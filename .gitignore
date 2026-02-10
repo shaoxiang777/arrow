@@ -10,6 +10,8 @@ cmake-build-release/
 *.user
 *~
 .vscode/
+__pycache__
+*.pt
 
 data/
 data_all/
