@@ -107,7 +107,125 @@ def _wait_with_events(vis, wait_ms, tick_ms=10):
     return True
 
 
-def animate_map(msg_path, frame_ms=50, frustum_scale=0.35, follow_view=True):
+def _filter_bounds_points(points, min_points_for_filter=32, quantile=0.02):
+    pts = np.asarray(points, dtype=np.float64)
+    if len(pts) < min_points_for_filter:
+        return pts
+
+    lower = np.quantile(pts, quantile, axis=0)
+    upper = np.quantile(pts, 1.0 - quantile, axis=0)
+    mask = np.all((pts >= lower) & (pts <= upper), axis=1)
+
+    filtered = pts[mask]
+    if len(filtered) < max(8, len(pts) // 4):
+        return pts
+    return filtered
+
+
+def _filter_points_by_radius(points, center, radius):
+    pts = np.asarray(points, dtype=np.float64)
+    if len(pts) == 0 or radius is None or radius <= 0:
+        return pts
+
+    center = np.asarray(center, dtype=np.float64).reshape(1, 3)
+    dists = np.linalg.norm(pts - center, axis=1)
+    filtered = pts[dists <= radius]
+    if len(filtered) == 0:
+        return pts
+    return filtered
+
+
+def _compute_scene_bounds(
+    traj_points,
+    lm_points,
+    frustum,
+    current_pos_w=None,
+    bounds_outlier_quantile=0.02,
+    bounds_focus_radius=None,
+):
+    all_points = []
+
+    traj_for_bounds = (
+        _filter_points_by_radius(traj_points, current_pos_w, bounds_focus_radius)
+        if traj_points else np.empty((0, 3), dtype=np.float64)
+    )
+    if len(traj_for_bounds) > 0:
+        all_points.extend(traj_for_bounds)
+
+    frustum_points = np.asarray(frustum.points)
+    if len(frustum_points) > 0:
+        all_points.extend(frustum_points)
+
+    lm_for_bounds = (
+        _filter_points_by_radius(lm_points, current_pos_w, bounds_focus_radius)
+        if lm_points else np.empty((0, 3), dtype=np.float64)
+    )
+    filtered_lm_points = (
+        _filter_bounds_points(lm_for_bounds, quantile=bounds_outlier_quantile)
+        if lm_points else np.empty((0, 3), dtype=np.float64)
+    )
+    if len(filtered_lm_points) > 0:
+        all_points.extend(filtered_lm_points)
+
+    if not all_points:
+        return None
+
+    pts = np.asarray(all_points, dtype=np.float64)
+    return pts.min(axis=0), pts.max(axis=0)
+
+
+def _bounds_expanded(bounds, refreshed_bounds, margin_ratio=0.05):
+    if bounds is None:
+        return False
+    if refreshed_bounds is None:
+        return True
+
+    cur_min, cur_max = bounds
+    ref_min, ref_max = refreshed_bounds
+    ref_extent = np.maximum(ref_max - ref_min, 1e-6)
+    margin = ref_extent * margin_ratio
+
+    return np.any(cur_min < (ref_min - margin)) or np.any(cur_max > (ref_max + margin))
+
+
+def _refresh_bounding_box(vis, bounds):
+    if bounds is None:
+        return
+
+    ctr = vis.get_view_control()
+    cam_params = ctr.convert_to_pinhole_camera_parameters()
+
+    bbox_min, bbox_max = bounds
+    corners = np.array([
+        [bbox_min[0], bbox_min[1], bbox_min[2]],
+        [bbox_min[0], bbox_min[1], bbox_max[2]],
+        [bbox_min[0], bbox_max[1], bbox_min[2]],
+        [bbox_min[0], bbox_max[1], bbox_max[2]],
+        [bbox_max[0], bbox_min[1], bbox_min[2]],
+        [bbox_max[0], bbox_min[1], bbox_max[2]],
+        [bbox_max[0], bbox_max[1], bbox_min[2]],
+        [bbox_max[0], bbox_max[1], bbox_max[2]],
+    ], dtype=np.float64)
+
+    bbox_pcd = o3d.geometry.PointCloud()
+    bbox_pcd.points = o3d.utility.Vector3dVector(corners)
+    vis.add_geometry(bbox_pcd, reset_bounding_box=True)
+    vis.remove_geometry(bbox_pcd, reset_bounding_box=False)
+
+    try:
+        ctr.convert_from_pinhole_camera_parameters(cam_params, allow_arbitrary=True)
+    except TypeError:
+        ctr.convert_from_pinhole_camera_parameters(cam_params)
+
+
+def animate_map(
+    msg_path,
+    frame_ms=50,
+    frustum_scale=0.35,
+    follow_view=True,
+    bounds_outlier_quantile=0.02,
+    bounds_focus_radius=None,
+):
     keyframes, lm_groups, lm_first_ids = load_map(msg_path)
     if not keyframes:
         raise RuntimeError("No keyframes found in map.")
@@ -130,6 +248,14 @@ def animate_map(msg_path, frame_ms=50, frustum_scale=0.35, follow_view=True):
     traj_colors = []
     lm_points = []
     lm_cursor = 0
+    refreshed_bounds = _compute_scene_bounds(
+        [],
+        [],
+        frustum,
+        current_pos_w=keyframes[0]["pos_w"],
+        bounds_outlier_quantile=bounds_outlier_quantile,
+        bounds_focus_radius=bounds_focus_radius,
+    )
 
     print(f"Total Keyframes: {len(keyframes)}")
     print(f"Total Landmark Groups: {len(lm_first_ids)}")
@@ -168,6 +294,18 @@ def animate_map(msg_path, frame_ms=50, frustum_scale=0.35, follow_view=True):
         frustum.lines = frustum_new.lines
         frustum.colors = frustum_new.colors
 
+        current_bounds = _compute_scene_bounds(
+            traj_points,
+            lm_points,
+            frustum,
+            current_pos_w=kf["pos_w"],
+            bounds_outlier_quantile=bounds_outlier_quantile,
+            bounds_focus_radius=bounds_focus_radius,
+        )
+        if _bounds_expanded(current_bounds, refreshed_bounds):
+            _refresh_bounding_box(vis, current_bounds)
+            refreshed_bounds = current_bounds
+
         if follow_view:
             _update_follow_view(vis, kf["pos_w"], kf["rot_wc"])
 
@@ -196,11 +334,25 @@ if __name__ == "__main__":
     parser.add_argument("--frame-ms", type=int, default=50, help="Animation step interval in milliseconds")
     parser.add_argument("--frustum-scale", type=float, default=0.35, help="Frustum size scale")
     parser.add_argument("--no-follow-view", action="store_true", help="Disable moving camera viewpoint")
+    parser.add_argument(
+        "--bounds-outlier-quantile",
+        type=float,
+        default=0.02,
+        help="Per-axis quantile used to ignore extreme landmark outliers when refreshing bounding box",
+    )
+    parser.add_argument(
+        "--bounds-focus-radius",
+        type=float,
+        default=None,
+        help="Only use points within this radius of the current camera position when refreshing bounding box",
+    )
     args = parser.parse_args()
 
     animate_map(
         args.map,
         frame_ms=args.frame_ms,
         frustum_scale=args.frustum_scale,
-        follow_view=not args.no_follow_view
+        follow_view=not args.no_follow_view,
+        bounds_outlier_quantile=args.bounds_outlier_quantile,
+        bounds_focus_radius=args.bounds_focus_radius,
     )
