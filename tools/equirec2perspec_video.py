@@ -1,6 +1,8 @@
 import cv2
+import json
 import numpy as np
 import time
+from tqdm import tqdm
 from ultralytics import YOLO
 import tools.Equirec2Perspec as E2P
 
@@ -341,6 +343,243 @@ def draw_stable_persons(image, visible_items):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
     return image
 
+
+def _load_map_keyframes(msg_path):
+    import msgpack
+    from scipy.spatial.transform import Rotation as R
+
+    with open(msg_path, "rb") as f:
+        msg = msgpack.Unpacker(f, raw=False).unpack()
+
+    keyframes = []
+    for kf in msg["keyframes"].values():
+        rot_cw = R.from_quat(kf["rot_cw"]).as_matrix()
+        trans_cw = np.array(kf["trans_cw"], dtype=np.float64).reshape(3, 1)
+        rot_wc = rot_cw.T
+        pos_w = (-rot_wc @ trans_cw).reshape(3)
+        keyframes.append({
+            "ts": float(kf["ts"]),
+            "rot_wc": rot_wc,
+            "pos_w": pos_w,
+        })
+    keyframes.sort(key=lambda x: x["ts"])
+    return keyframes
+
+
+def _estimate_global_track_plane(keyframes):
+    positions = np.asarray([kf["pos_w"] for kf in keyframes], dtype=np.float64)
+    if len(positions) < 3:
+        return positions[0], np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+    center = positions.mean(axis=0)
+    _, _, vh = np.linalg.svd(positions - center, full_matrices=False)
+    normal = vh[-1]
+    normal = normal / max(np.linalg.norm(normal), 1e-6)
+    first_up = keyframes[0]["rot_wc"] @ np.array([0.0, -1.0, 0.0], dtype=np.float64)
+    if float(np.dot(normal, first_up)) < 0.0:
+        normal = -normal
+    return center, normal
+
+
+def _load_frame_trajectory(path):
+    from scipy.spatial.transform import Rotation as R
+
+    poses = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) != 8:
+                continue
+            ts = float(parts[0])
+            pos_w = np.array([float(parts[1]), float(parts[2]), float(parts[3])], dtype=np.float64)
+            quat_xyzw = [float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7])]
+            rot_wc = R.from_quat(quat_xyzw).as_matrix()
+            poses.append({
+                "ts": ts,
+                "pos_w": pos_w,
+                "rot_wc": rot_wc,
+            })
+    return poses
+
+
+def _estimate_pose_frame_step(frame_poses, fps, override_step):
+    if override_step is not None and override_step > 0:
+        return float(override_step)
+    if not frame_poses or fps <= 0.0:
+        return 1.0
+    timestamps = np.asarray([pose["ts"] for pose in frame_poses], dtype=np.float64)
+    if len(timestamps) < 2:
+        return 1.0
+    deltas = np.diff(timestamps)
+    deltas = deltas[deltas > 1e-9]
+    if len(deltas) == 0:
+        return 1.0
+    return max(1.0, float(np.median(deltas)) * fps)
+
+
+def _interpolate_pose(frame_poses, video_frame_idx, pose_frame_step):
+    from scipy.spatial.transform import Rotation as R, Slerp
+
+    if not frame_poses:
+        return None
+
+    pose_index = float(video_frame_idx) / max(pose_frame_step, 1e-6)
+    pose_index = float(np.clip(pose_index, 0.0, len(frame_poses) - 1))
+    low = int(np.floor(pose_index))
+    high = int(np.ceil(pose_index))
+    if low == high:
+        return frame_poses[low]
+
+    alpha = float(pose_index - low)
+    pose_a = frame_poses[low]
+    pose_b = frame_poses[high]
+    pos_w = (1.0 - alpha) * pose_a["pos_w"] + alpha * pose_b["pos_w"]
+    slerp = Slerp([0.0, 1.0], R.from_matrix([pose_a["rot_wc"], pose_b["rot_wc"]]))
+    rot_wc = slerp([alpha]).as_matrix()[0]
+    ts = (1.0 - alpha) * pose_a["ts"] + alpha * pose_b["ts"]
+    return {"ts": ts, "pos_w": pos_w, "rot_wc": rot_wc}
+
+
+def _build_export_context(map_path, frame_traj_path, fps, slam_frame_skip):
+    if not map_path or not frame_traj_path:
+        return None
+
+    keyframes = _load_map_keyframes(map_path)
+    frame_poses = _load_frame_trajectory(frame_traj_path)
+    plane_point, plane_normal = _estimate_global_track_plane(keyframes)
+    pose_frame_step = _estimate_pose_frame_step(frame_poses, fps, slam_frame_skip)
+    return {
+        "frame_poses": frame_poses,
+        "plane_point": plane_point,
+        "plane_normal": plane_normal,
+        "pose_frame_step": pose_frame_step,
+        "track_radius": 6.0,
+    }
+
+
+def _world_point_from_plane(item, frame_idx, frame_width, frame_height, export_context):
+    if export_context is None:
+        return None
+
+    pose = _interpolate_pose(
+        export_context["frame_poses"],
+        frame_idx,
+        export_context["pose_frame_step"],
+    )
+    if pose is None:
+        return None
+
+    x1, y1, x2, y2 = item["box"].astype(float).tolist()
+    panel_w = frame_width / 4.0
+    panel_h = float(frame_height)
+    if panel_w <= 1.0 or panel_h <= 1.0:
+        return None
+
+    u = 0.5 * (x1 + x2)
+    v = y2
+    view_idx = int(np.clip(np.floor(u / panel_w), 0, 3))
+    u_local = float(np.clip(u - view_idx * panel_w, 0.0, panel_w - 1.0))
+    v_local = float(np.clip(v, 0.0, panel_h - 1.0))
+
+    f = 0.5 * panel_w / np.tan(np.deg2rad(90.0) * 0.5)
+    cx = 0.5 * panel_w
+    cy = 0.5 * panel_h
+    x_cam = (u_local - cx) / max(f, 1e-6)
+    y_cam = (v_local - cy) / max(f, 1e-6)
+    dir_panel = np.array([x_cam, y_cam, 1.0], dtype=np.float64)
+    dir_panel = dir_panel / max(np.linalg.norm(dir_panel), 1e-6)
+
+    yaw_centers_deg = [0.0, 90.0, 180.0, 270.0]
+    yaw = np.deg2rad(yaw_centers_deg[view_idx])
+    rot_y = np.array([
+        [np.cos(yaw), 0.0, np.sin(yaw)],
+        [0.0, 1.0, 0.0],
+        [-np.sin(yaw), 0.0, np.cos(yaw)],
+    ], dtype=np.float64)
+    dir_cam = rot_y @ dir_panel
+    dir_cam = dir_cam / max(np.linalg.norm(dir_cam), 1e-6)
+
+    origin = np.asarray(pose["pos_w"], dtype=np.float64)
+    dir_world = pose["rot_wc"] @ dir_cam
+    dir_world = dir_world / max(np.linalg.norm(dir_world), 1e-6)
+    plane_point = export_context["plane_point"]
+    plane_normal = export_context["plane_normal"]
+    denom = float(np.dot(plane_normal, dir_world))
+    if abs(denom) > 1e-6:
+        t = float(np.dot(plane_normal, plane_point - origin) / denom)
+        if t > 0:
+            world_point = origin + t * dir_world
+        else:
+            world_point = None
+    else:
+        world_point = None
+
+    if world_point is None:
+        fallback = origin + export_context["track_radius"] * dir_world
+        signed_dist = float(np.dot(plane_normal, fallback - plane_point))
+        world_point = fallback - signed_dist * plane_normal
+
+    return {
+        "view_idx": view_idx,
+        "local_center_xy": [u_local, 0.5 * (y1 + y2)],
+        "ray_world": dir_world.tolist(),
+        "world_point": world_point.tolist(),
+        "world_point_method": "ground_plane_intersection_from_map",
+    }
+
+
+def _build_track_export_item(item, frame_idx, frame_width, frame_height, export_context=None):
+    x1, y1, x2, y2 = item["box"].astype(float).tolist()
+    cx = 0.5 * (x1 + x2)
+    cy = 0.5 * (y1 + y2)
+    payload = {
+        "frame_idx": int(frame_idx),
+        "stable_id": int(item["stable_id"]),
+        "ghost": bool(item.get("ghost", False)),
+        "bbox_xyxy": [x1, y1, x2, y2],
+        "center_xy": [cx, cy],
+        "center_x_norm": float(cx / max(frame_width, 1)),
+    }
+    extra = _world_point_from_plane(item, frame_idx, frame_width, frame_height, export_context)
+    if extra is not None:
+        payload.update(extra)
+    return payload
+
+
+def _save_track_export(path, video_path, total_frames, fps, frame_width, frame_height, items, export_context=None):
+    tracks = {}
+    allowed_ids = {1, 2, 3}
+    for item in items:
+        if int(item["stable_id"]) not in allowed_ids:
+            continue
+        sid = str(item["stable_id"])
+        entry = {
+            "frame_idx": item["frame_idx"],
+            "ghost": item["ghost"],
+            "bbox_xyxy": item["bbox_xyxy"],
+            "center_xy": item["center_xy"],
+            "center_x_norm": item["center_x_norm"],
+        }
+        for key in ("view_idx", "local_center_xy", "ray_world", "point_cam", "world_point", "world_point_method"):
+            if key in item:
+                entry[key] = item[key]
+        tracks.setdefault(sid, []).append(entry)
+
+    payload = {
+        "video_path": video_path,
+        "total_frames": int(total_frames),
+        "fps": float(fps),
+        "frame_width": int(frame_width),
+        "frame_height": int(frame_height),
+        "tracks": tracks,
+    }
+    if export_context is not None:
+        payload["ground_plane_point"] = export_context["plane_point"].tolist()
+        payload["ground_plane_normal"] = export_context["plane_normal"].tolist()
+        payload["slam_pose_frame_step"] = float(export_context["pose_frame_step"])
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=True, indent=2)
+
 def get_four_views_combined(equ_manager, fov=90, h=720, w=1080):
     """
     获取前后左右四个视角的透视图并水平拼接。
@@ -363,7 +602,8 @@ def get_four_views_combined(equ_manager, fov=90, h=720, w=1080):
     combined = cv2.hconcat(views)
     return combined
 
-def run_video_multi_view(video_path, video_save_path='output_object_detection.mp4'):
+def run_video_multi_view(video_path, video_save_path='output_object_detection.mp4', track_save_path=None,
+                         map_path=None, frame_traj_path=None, slam_frame_skip=None):
     # 1. 加载 YOLO 模型 (确保已安装 ultralytics: pip install ultralytics)
     # 建议使用 yolov8n.pt 以获得最快速度
     model = YOLO('yolov8n.pt') 
@@ -377,6 +617,7 @@ def run_video_multi_view(video_path, video_save_path='output_object_detection.mp
     original_fps = cap.get(cv2.CAP_PROP_FPS)
     if original_fps == 0: original_fps = 30.0
     frame_delay = 1.0 / original_fps
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     # 设定输出单张切片的大小
     slice_h, slice_w = 480, 640 
@@ -401,6 +642,9 @@ def run_video_multi_view(video_path, video_save_path='output_object_detection.mp
         appearance_thresh=0.4  # （更低更容易按外观接回）
     )
     frame_idx = 0
+    exported_track_items = []
+    export_context = _build_export_context(map_path, frame_traj_path, original_fps, slam_frame_skip)
+    progress = tqdm(total=total_frames if total_frames > 0 else None, desc="Processing video", unit="frame")
 
     while cap.isOpened():
         start_time = time.time() # 记录处理开始时刻
@@ -445,7 +689,21 @@ def run_video_multi_view(video_path, video_save_path='output_object_detection.mp
             persons = _extract_persons_with_merge(results[0], combined_display)
             visible_items = stable_tracker.update(persons, frame_idx)
             annotated_frame = draw_stable_persons(annotated_frame, visible_items)
+            if track_save_path:
+                for item in visible_items:
+                    if item.get("ghost", False):
+                        continue
+                    exported_track_items.append(
+                        _build_track_export_item(
+                            item,
+                            frame_idx,
+                            combined_w,
+                            combined_h,
+                            export_context=export_context,
+                        )
+                    )
         frame_idx += 1
+        progress.update(1)
 
         out.write(annotated_frame)
 
@@ -469,7 +727,20 @@ def run_video_multi_view(video_path, video_save_path='output_object_detection.mp
 
     cap.release()
     out.release()
+    progress.close()
     cv2.destroyAllWindows()
+    if track_save_path:
+        _save_track_export(
+            track_save_path,
+            video_path=video_path,
+            total_frames=total_frames,
+            fps=original_fps,
+            frame_width=combined_w,
+            frame_height=combined_h,
+            items=exported_track_items,
+            export_context=export_context,
+        )
+        print(f"轨迹已保存至: {track_save_path}")
     print(f"视频已保存至: {video_save_path}")
 
 
@@ -583,8 +854,17 @@ def run_yolo_on_pano(video_path):
 if __name__ == '__main__':
 
     video_path = 'data/arrow360/VIDEO_0665/video.mp4'
+    track_save_path = 'data/arrow360/VIDEO_0665/object_tracks.json'
+    map_path = 'data/arrow360/VIDEO_0665/my_saved_map.msg'
+    frame_traj_path = 'data/arrow360/VIDEO_0665/frame_trajectory.txt'
 
-    run_video_multi_view(video_path)
+    run_video_multi_view(
+        video_path,
+        track_save_path=track_save_path,
+        map_path=map_path,
+        frame_traj_path=frame_traj_path,
+        slam_frame_skip=2,
+    )
 
     # run_yolo_on_pano(video_path)
 
