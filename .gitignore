@@ -15,6 +15,7 @@ __pycache__
 
 data/
 data_all/
+output/
 orb_vocab.fbow
 
 # Prerequisites

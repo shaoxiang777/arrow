@@ -1,3 +1,6 @@
+import argparse
+import os
+
 import cv2
 import json
 import numpy as np
@@ -5,6 +8,8 @@ import time
 from tqdm import tqdm
 from ultralytics import YOLO
 import tools.Equirec2Perspec as E2P
+
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".mpg", ".mpeg", ".m4v"}
 
 
 def _has_intersection(box_a, box_b):
@@ -547,6 +552,9 @@ def _build_track_export_item(item, frame_idx, frame_width, frame_height, export_
 
 
 def _save_track_export(path, video_path, total_frames, fps, frame_width, frame_height, items, export_context=None):
+    parent_dir = os.path.dirname(path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
     tracks = {}
     allowed_ids = {1, 2, 3}
     for item in items:
@@ -579,6 +587,22 @@ def _save_track_export(path, video_path, total_frames, fps, frame_width, frame_h
         payload["slam_pose_frame_step"] = float(export_context["pose_frame_step"])
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=True, indent=2)
+
+
+def _resolve_video_output_path(video_path, output_arg):
+    output_arg = output_arg or "output_object_detection.mp4"
+    output_arg = os.path.normpath(output_arg)
+    suffix = os.path.splitext(output_arg)[1].lower()
+
+    if suffix in VIDEO_EXTENSIONS:
+        parent_dir = os.path.dirname(output_arg)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        return output_arg
+
+    os.makedirs(output_arg, exist_ok=True)
+    input_stem = os.path.splitext(os.path.basename(video_path))[0] or "video"
+    return os.path.join(output_arg, f"{input_stem}_object_detection.mp4")
 
 def get_four_views_combined(equ_manager, fov=90, h=720, w=1080):
     """
@@ -623,9 +647,13 @@ def run_video_multi_view(video_path, video_save_path='output_object_detection.mp
     slice_h, slice_w = 480, 640 
     # 拼接后总宽度为 640*4 = 2560，总高度为 480
 
+    video_save_path = _resolve_video_output_path(video_path, video_save_path)
     fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
     combined_w, combined_h = slice_w * 4, slice_h
     out = cv2.VideoWriter(video_save_path, fourcc, original_fps, (combined_w, combined_h))
+    if not out.isOpened():
+        cap.release()
+        raise RuntimeError(f"无法创建输出视频文件: {video_save_path}")
 
     # 视角参数
     angles = [0, 90, 180, 270] # 前、右、后、左
@@ -851,23 +879,56 @@ def run_yolo_on_pano(video_path):
     cap.release()
     cv2.destroyAllWindows()
 
-if __name__ == '__main__':
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--video",
+        default="data/arrow360/VIDEO_0665/video.mp4",
+        help="Input equirectangular video path.",
+    )
+    parser.add_argument(
+        "--output",
+        default="output_object_detection.mp4",
+        help="Output annotated video path.",
+    )
+    parser.add_argument(
+        "--track-output",
+        default="data/arrow360/VIDEO_0665/object_tracks.json",
+        help="Optional exported track JSON path. Pass empty string to disable.",
+    )
+    parser.add_argument(
+        "--map-path",
+        default="data/arrow360/VIDEO_0665/my_saved_map.msg",
+        help="Map file used for world point export.",
+    )
+    parser.add_argument(
+        "--frame-traj-path",
+        default="data/arrow360/VIDEO_0665/frame_trajectory.txt",
+        help="Frame trajectory file used for world point export.",
+    )
+    parser.add_argument(
+        "--slam-frame-skip",
+        type=int,
+        default=2,
+        help="Frame skip used by SLAM trajectory export.",
+    )
+    return parser.parse_args()
 
-    video_path = 'data/arrow360/VIDEO_0665/video.mp4'
-    track_save_path = 'data/arrow360/VIDEO_0665/object_tracks.json'
-    map_path = 'data/arrow360/VIDEO_0665/my_saved_map.msg'
-    frame_traj_path = 'data/arrow360/VIDEO_0665/frame_trajectory.txt'
+
+if __name__ == '__main__':
+    args = parse_args()
 
     run_video_multi_view(
-        video_path,
-        track_save_path=track_save_path,
-        map_path=map_path,
-        frame_traj_path=frame_traj_path,
-        slam_frame_skip=2,
+        args.video,
+        video_save_path=args.output,
+        track_save_path=args.track_output or None,
+        map_path=args.map_path,
+        frame_traj_path=args.frame_traj_path,
+        slam_frame_skip=args.slam_frame_skip,
     )
 
     # run_yolo_on_pano(video_path)
 
     # run_cyclist_distance_detection(video_path)
 
-# python tools/equirec2perspec_video.py
+# python tools/equirec2perspec_video.py --output path/to/output.mp4
