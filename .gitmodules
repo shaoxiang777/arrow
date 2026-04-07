@@ -7,3 +7,6 @@
 [submodule "third_part/video_da2"]
 	path = third_part/video_da2
 	url = git@github.com:shaoxiang777/video_da2.git
+[submodule "third_part/DAP"]
+	path = third_part/DAP
+	url = git@github.com:shaoxiang777/DAP.git
