@@ -61,7 +61,7 @@ DAP may install a different PyTorch stack. Verify that PyTorch can access the GP
 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ```
 
-Download the pretrained DAP model described in the [DAP README](third_part/DAP/README.md), then place it at:
+Download the [pretrained DAP model](https://huggingface.co/Insta360-Research/DAP-weights/blob/main/model.pth), then place it at:
 
 ```text
 third_part/DAP/weights/model.pth
@@ -97,8 +97,8 @@ Place the two calibration videos at:
 
 ```text
 data/ricoh/cali_opencv/
-├── cam_1/video.MP4
-└── cam_2/video.MP4
+├── cam_0/video.MP4
+└── cam_1/video.MP4
 ```
 
 Activate the project environment:
@@ -110,8 +110,8 @@ conda activate arrow
 Open `run_cali_opencv.sh` and update the parameters for your recordings:
 
 ```bash
-CAM0_VIDEO="data/ricoh/cali_opencv/cam_1/video.MP4"
-CAM1_VIDEO="data/ricoh/cali_opencv/cam_2/video.MP4"
+CAM0_VIDEO="data/ricoh/cali_opencv/cam_0/video.MP4"
+CAM1_VIDEO="data/ricoh/cali_opencv/cam_1/video.MP4"
 
 CAM0_START_FRAME=557
 CAM1_START_FRAME=554
@@ -148,20 +148,20 @@ Run:
 bash run_cali_opencv.sh
 ```
 
-The script decodes both videos into `cam_1/frames` and `cam_2/frames` under `SYNC_ROOT`. Compare the images and identify frame numbers that represent the same moment.
+The script decodes both videos into `cam_0/frames` and `cam_1/frames` under `SYNC_ROOT`. Compare the images and identify frame numbers that represent the same moment.
 
 <table>
   <tr>
-    <th align="center">cam_1 · frame 000127</th>
-    <th align="center">cam_2 · frame 000124</th>
+    <th align="center">cam_0 · frame 000127</th>
+    <th align="center">cam_1 · frame 000124</th>
   </tr>
   <tr>
-    <td><img src="media/cam_1_frame_000127.jpg" alt="Camera 1 frame 000127" width="100%"></td>
-    <td><img src="media/cam_2_frame_000124.jpg" alt="Camera 2 frame 000124" width="100%"></td>
+    <td><img src="media/cam_0_frame_000127.jpg" alt="Camera 0 frame 000127" width="100%"></td>
+    <td><img src="media/cam_1_frame_000124.jpg" alt="Camera 1 frame 000124" width="100%"></td>
   </tr>
 </table>
 
-These images show the same moment at frame `127` in `cam_1` and frame `124` in `cam_2`, revealing a fixed offset of three frames.
+These images show the same moment at frame `127` in `cam_0` and frame `124` in `cam_1`, revealing a fixed offset of three frames.
 
 The final start frames used by this project are:
 

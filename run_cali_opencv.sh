@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Parameters
-CAM0_VIDEO="data/ricoh/cali_opencv/cam_1/video.MP4"
-CAM1_VIDEO="data/ricoh/cali_opencv/cam_2/video.MP4"
+CAM0_VIDEO="data/ricoh/cali_opencv/cam_0/video.MP4"
+CAM1_VIDEO="data/ricoh/cali_opencv/cam_1/video.MP4"
 SYNC_ROOT="data/ricoh/cali_opencv/sync"
 
 CAM0_START_FRAME=557

@@ -12,9 +12,9 @@ from tqdm import tqdm
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CAM0_VIDEO = REPO_ROOT / "data/ricoh/cali/cam_1/8K.MP4"
-DEFAULT_CAM1_VIDEO = REPO_ROOT / "data/ricoh/cali/cam_2/8K.MP4"
-DEFAULT_OUTPUT_ROOT = REPO_ROOT / "data/ricoh/cali/sync_8k"
+DEFAULT_CAM0_VIDEO = REPO_ROOT / "data/ricoh/cali_opencv/cam_0/video.MP4"
+DEFAULT_CAM1_VIDEO = REPO_ROOT / "data/ricoh/cali_opencv/cam_1/video.MP4"
+DEFAULT_OUTPUT_ROOT = REPO_ROOT / "data/ricoh/cali_opencv/sync"
 
 
 def _check_video(path):
@@ -120,8 +120,8 @@ def command_extract(args):
     info1 = _video_info(args.cam1_video)
     print(f"cam0: {info0}")
     print(f"cam1: {info1}")
-    extract_video_frames(args.cam0_video, root / "cam_1", args.every, args.max_frames, args.jpeg_quality)
-    extract_video_frames(args.cam1_video, root / "cam_2", args.every, args.max_frames, args.jpeg_quality)
+    extract_video_frames(args.cam0_video, root / "cam_0", args.every, args.max_frames, args.jpeg_quality)
+    extract_video_frames(args.cam1_video, root / "cam_1", args.every, args.max_frames, args.jpeg_quality)
     print(f"wrote extracted frames under: {root}")
 
 
@@ -233,7 +233,7 @@ def build_parser():
     parser.add_argument("--cam1-video", default=str(DEFAULT_CAM1_VIDEO))
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    extract = subparsers.add_parser("extract", help="Extract full-resolution frames into cam_1/cam_2 folders")
+    extract = subparsers.add_parser("extract", help="Extract full-resolution frames into cam_0/cam_1 folders")
     extract.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     extract.add_argument("--every", type=int, default=1, help="Extract every Nth frame")
     extract.add_argument("--max-frames", type=int, default=None)

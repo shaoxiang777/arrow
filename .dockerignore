@@ -12,6 +12,27 @@ README.md
 wercker.yml
 docs/
 
+# runtime data and generated outputs
+data/
+output/
+runs/
+media/
+third_part/
+.agents/
+
+# Python caches
+__pycache__/
+**/__pycache__/
+
+# models and large generated files
+*.mp4
+*.MP4
+*.msg
+*.npy
+*.pth
+*.pt
+orb_vocab.fbow
+
 # build directory
 build/
 cmake-build-debug/
