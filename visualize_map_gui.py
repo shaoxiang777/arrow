@@ -128,6 +128,10 @@ def _color_from_track_id(track_id):
     ], dtype=np.float64) / 255.0
 
 
+def _rgb_color_from_track_id(track_id):
+    return _color_from_track_id(track_id)[::-1]
+
+
 def load_track_export(track_path):
     if track_path is None or not os.path.isfile(track_path):
         return None
@@ -258,6 +262,28 @@ def _fit_thumbnail(image, width=160, height=90):
     y0 = (height - dst_h) // 2
     canvas[y0:y0 + dst_h, x0:x0 + dst_w] = resized
     return canvas
+
+
+def _make_b_object_preview_image(distance_text, thumbnail, width, height):
+    image = np.full((height, width, 3), 20, dtype=np.uint8)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.95
+    thickness = 2
+    text_size, _ = cv2.getTextSize(distance_text, font, font_scale, thickness)
+    text_x = max(8, (width - text_size[0]) // 2)
+    cv2.putText(
+        image,
+        distance_text,
+        (text_x, 44),
+        font,
+        font_scale,
+        (255, 255, 255),
+        thickness,
+        cv2.LINE_AA,
+    )
+    thumb = _fit_thumbnail(thumbnail, width=width, height=max(1, height - 62))
+    image[62:62 + thumb.shape[0], :thumb.shape[1]] = thumb
+    return image
 
 
 def _resolve_track_video_path(track_data):
@@ -436,10 +462,12 @@ class MapGuiApp:
             self.track_data,
             slam_frame_skip,
         )
-        if self.frame_poses:
-            self.total_frames = len(self.frame_poses)
+        if self.overlay_video_info is not None and int(self.overlay_video_info.get("frame_count", 0)) > 0:
+            self.total_frames = int(self.overlay_video_info["frame_count"])
         elif self.track_data is not None and int(self.track_data.get("total_frames", 0)) > 0:
             self.total_frames = int(self.track_data["total_frames"])
+        elif self.frame_poses:
+            self.total_frames = int(round((len(self.frame_poses) - 1) * max(self.pose_frame_step, 1.0))) + 1
         else:
             self.total_frames = len(self.keyframes)
         self.show_object_tracks = self.track_data is not None
@@ -458,6 +486,7 @@ class MapGuiApp:
         self._slider_updating = False
         self._closed = False
         self._animation_thread = None
+        self._frame_update_pending = False
         self._last_middle_down = None
         self._middle_dragging = False
         self._drag_threshold = 4.0
@@ -491,6 +520,9 @@ class MapGuiApp:
         self.window.set_on_close(self._on_close)
 
         self.video_widget = None
+        self.b_object_panel = None
+        self.b_object_image = None
+        self._b_object_preview_size = (360, 450)
         if self.overlay_video_info is not None:
             placeholder = np.zeros(
                 (self.overlay_video_info["height"], self.overlay_video_info["width"], 3),
@@ -498,6 +530,17 @@ class MapGuiApp:
             )
             self.video_widget = gui.ImageWidget(o3d.geometry.Image(np.ascontiguousarray(placeholder)))
             self.window.add_child(self.video_widget)
+            self.b_object_panel = gui.Vert(0.25 * self.window.theme.font_size, gui.Margins(0, 0, 0, 0))
+            preview = _make_b_object_preview_image(
+                "Distance to Ego: N/A",
+                _make_placeholder_thumbnail("Object B"),
+                *self._b_object_preview_size,
+            )
+            self.b_object_image = gui.ImageWidget(
+                o3d.geometry.Image(np.ascontiguousarray(preview))
+            )
+            self.b_object_panel.add_child(self.b_object_image)
+            self.window.add_child(self.b_object_panel)
 
         self.scene_widget = gui.SceneWidget()
         self.scene_widget.scene = rendering.Open3DScene(self.window.renderer)
@@ -605,6 +648,21 @@ class MapGuiApp:
             video_height = int(round(video_width / self.overlay_video_info["aspect"]))
             video_x = r.x + (r.width - video_width) // 2
             self.video_widget.frame = gui.Rect(video_x, r.y, video_width, video_height)
+            if self.b_object_panel is not None:
+                margin = int(0.5 * layout_context.theme.font_size)
+                preview_width = max(160, video_x - r.x - 2 * margin)
+                preview_height = max(1, video_height - 2 * margin)
+                old_preview_size = self._b_object_preview_size
+                self._b_object_preview_size = (preview_width, preview_height)
+                self.b_object_panel.frame = gui.Rect(
+                    r.x + margin,
+                    r.y + margin,
+                    preview_width,
+                    preview_height,
+                )
+                if old_preview_size != self._b_object_preview_size:
+                    pose = self._frame_pose_for_video_frame(self.cur_index)
+                    self._update_b_object_preview(self.cur_index, np.asarray(pose["pos_w"], dtype=np.float64))
         bottom_y = r.y + video_height
         bottom_h = max(1, r.height - video_height)
         self.scene_widget.frame = gui.Rect(r.x, bottom_y, r.width - panel_width, bottom_h)
@@ -801,6 +859,27 @@ class MapGuiApp:
         distance = float(np.linalg.norm(world_a - world_b))
         self.object_distance_label.text = f"Distance {sid_a} <-> {sid_b}: {distance:.2f} m"
 
+    def _update_b_object_preview(self, current_video_frame_idx, ego_pos_w):
+        if self.b_object_panel is None:
+            return
+
+        sid_b = int(self._distance_object_b)
+        if sid_b == 0:
+            distance = 0.0
+            image = _make_placeholder_thumbnail("Ego")
+        else:
+            distance = self._current_track_distance_map(current_video_frame_idx, ego_pos_w).get(sid_b)
+            image = self.track_thumbnails.get(sid_b)
+            if image is None:
+                image = _make_placeholder_thumbnail(f"Object {sid_b}")
+
+        if distance is None:
+            distance_text = "Distance to Ego: N/A"
+        else:
+            distance_text = f"Distance to Ego: {distance:.2f} m"
+        preview = _make_b_object_preview_image(distance_text, image, *self._b_object_preview_size)
+        self.b_object_image.update_image(o3d.geometry.Image(np.ascontiguousarray(preview)))
+
     def _on_slider_changed(self, value):
         if self._slider_updating:
             return
@@ -813,6 +892,9 @@ class MapGuiApp:
                 if not self.playing:
                     time.sleep(0.05)
                     continue
+                if self._frame_update_pending:
+                    time.sleep(0.001)
+                    continue
                 next_index = min(self.cur_index + 1, self.total_frames - 1)
                 if next_index == self.cur_index:
                     self.playing = False
@@ -823,9 +905,17 @@ class MapGuiApp:
                     continue
 
                 self.cur_index = next_index
+                self._frame_update_pending = True
+
+                def apply_frame(idx=next_index):
+                    try:
+                        self._apply_frame(idx, reset_camera=False)
+                    finally:
+                        self._frame_update_pending = False
+
                 gui.Application.instance.post_to_main_thread(
                     self.window,
-                    lambda idx=next_index: self._apply_frame(idx, reset_camera=False),
+                    apply_frame,
                 )
                 time.sleep(self.frame_dt)
 
@@ -843,7 +933,8 @@ class MapGuiApp:
         if self._overlay_last_frame_idx == idx:
             return
 
-        self.overlay_video_cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        if self._overlay_last_frame_idx is None or idx != self._overlay_last_frame_idx + 1:
+            self.overlay_video_cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
         ret, frame = self.overlay_video_cap.read()
         if not ret or frame is None:
             return
@@ -875,7 +966,8 @@ class MapGuiApp:
 
     def _video_frame_to_keyframe_index(self, video_frame_idx):
         if self.frame_poses:
-            pose_ts = float(self.frame_poses[int(np.clip(video_frame_idx, 0, len(self.frame_poses) - 1))]["ts"])
+            pose = self._frame_pose_for_video_frame(video_frame_idx)
+            pose_ts = float(pose["ts"])
             keyframe_ts = np.asarray([kf["ts"] for kf in self.keyframes], dtype=np.float64)
             keyframe_idx = int(np.searchsorted(keyframe_ts, pose_ts, side="right") - 1)
             return int(np.clip(keyframe_idx, 0, len(self.keyframes) - 1))
@@ -1004,12 +1096,39 @@ class MapGuiApp:
             if len(traj) < 2:
                 continue
 
-            color = _color_from_track_id(sid)
+            color = _rgb_color_from_track_id(sid)
             points.extend(traj)
             for i in range(len(traj) - 1):
                 lines.append([point_offset + i, point_offset + i + 1])
                 colors.append(color)
             point_offset += len(traj)
+
+        return build_colored_lineset(points, lines, colors)
+
+    def _build_object_frustum_lineset(self, current_video_frame_idx, rot_wc):
+        if self.track_data is None or not self.show_object_tracks:
+            return o3d.geometry.LineSet()
+
+        points = []
+        lines = []
+        colors = []
+        point_offset = 0
+        for sid in sorted(self.selected_track_ids):
+            world = self._current_track_world_point(current_video_frame_idx, sid)
+            if world is None:
+                continue
+            frustum = make_frustum(
+                world,
+                rot_wc,
+                scale=self.frustum_scale * self._ego_scale,
+            )
+            frustum_points = np.asarray(frustum.points)
+            frustum_lines = np.asarray(frustum.lines)
+            color = _rgb_color_from_track_id(sid)
+            points.extend(frustum_points)
+            lines.extend((frustum_lines + point_offset).tolist())
+            colors.extend([color] * len(frustum_lines))
+            point_offset += len(frustum_points)
 
         return build_colored_lineset(points, lines, colors)
 
@@ -1020,11 +1139,14 @@ class MapGuiApp:
         ego_pos_w = np.asarray(pose["pos_w"], dtype=np.float64)
         self._update_track_distance_labels(idx, ego_pos_w)
         self._update_object_distance_label(idx, ego_pos_w)
+        self._update_b_object_preview(idx, ego_pos_w)
         keyframe_idx = self._video_frame_to_keyframe_index(idx)
         kf = self.keyframes[keyframe_idx]
 
         if self.frame_poses:
-            traj_points = [self._scale_map_point(x["pos_w"]) for x in self.frame_poses[:idx + 1]]
+            pose_index = int(np.floor(float(idx) / max(self.pose_frame_step, 1e-6)))
+            pose_index = int(np.clip(pose_index, 0, len(self.frame_poses) - 1))
+            traj_points = [self._scale_map_point(x["pos_w"]) for x in self.frame_poses[:pose_index + 1]]
         else:
             traj_points = [self._scale_map_point(x["pos_w"]) for x in self.keyframes[:keyframe_idx + 1]]
         lm_count = self._num_landmarks_until(keyframe_idx)
@@ -1042,6 +1164,7 @@ class MapGuiApp:
             scale=self.frustum_scale * self._ego_scale,
         )
         obj_tracks = self._build_track_lineset(idx)
+        obj_frustums = self._build_object_frustum_lineset(idx, pose["rot_wc"])
 
         pcd_mat = rendering.MaterialRecord()
         pcd_mat.shader = "defaultUnlit"
@@ -1049,9 +1172,9 @@ class MapGuiApp:
 
         line_mat = rendering.MaterialRecord()
         line_mat.shader = "unlitLine"
-        line_mat.line_width = 2.0
+        line_mat.line_width = 4.0
 
-        for name in ("pcd", "traj", "frustum", "obj_tracks"):
+        for name in ("pcd", "traj", "frustum", "obj_tracks", "obj_frustums"):
             if self.scene_widget.scene.has_geometry(name):
                 self.scene_widget.scene.remove_geometry(name)
 
@@ -1063,6 +1186,8 @@ class MapGuiApp:
             self.scene_widget.scene.add_geometry("frustum", frustum, line_mat)
         if has_lineset_lines(obj_tracks):
             self.scene_widget.scene.add_geometry("obj_tracks", obj_tracks, line_mat)
+        if has_lineset_lines(obj_frustums):
+            self.scene_widget.scene.add_geometry("obj_frustums", obj_frustums, line_mat)
 
         if reset_camera or self.follow_view:
             self._set_camera_from_pose(pose["pos_w"], pose["rot_wc"])

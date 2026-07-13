@@ -1649,6 +1649,8 @@ def _ensure_video_frame_exports_from_video(video_path):
             progress.close()
             cap.release()
         existing_pngs = sorted(frame_dir.glob("*.png"))
+    else:
+        print(f"[INFO] Reusing existing ERP frames for DAP: {frame_dir} ({len(existing_pngs)} frames)")
 
     with txt_path.open("w", encoding="utf-8") as f:
         for frame_path in existing_pngs:
@@ -1971,10 +1973,6 @@ def run_video_multi_view(video_path, video_save_path='output_object_detection.mp
     fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
     combined_w, combined_h = slice_w * 4, slice_h
     output_h = combined_h * 2 if with_depth else combined_h
-    out = cv2.VideoWriter(video_save_path, fourcc, original_fps, (combined_w, output_h))
-    if not out.isOpened():
-        cap.release()
-        raise RuntimeError(f"无法创建输出视频文件: {video_save_path}")
 
     # 视角参数
     angles = [0, 90, 180, 270] # 前、右、后、左
@@ -2068,6 +2066,11 @@ def run_video_multi_view(video_path, video_save_path='output_object_detection.mp
         depth_state = None
         frame_source = None
         progress = tqdm(total=total_frames if total_frames > 0 else None, desc="Processing video", unit="frame")
+
+    out = cv2.VideoWriter(video_save_path, fourcc, original_fps, (combined_w, output_h))
+    if not out.isOpened():
+        cap.release()
+        raise RuntimeError(f"无法创建输出视频文件: {video_save_path}")
 
     while True:
         start_time = time.time() # 记录处理开始时刻
