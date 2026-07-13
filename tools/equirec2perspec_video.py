@@ -159,6 +159,7 @@ class StablePersonTracker:
             raw_id = person.get("raw_id")
             conf = float(person.get("conf", 0.0))
             feat = person.get("feat")
+            mask = person.get("mask")
             label = person.get("label", "person")
             cls_id = int(person.get("cls_id", 0))
 
@@ -246,6 +247,7 @@ class StablePersonTracker:
                 "confidence": float(self.tracks[stable_id].get("last_conf", 0.0)),
                 "label": self.tracks[stable_id].get("label", "person"),
                 "cls_id": int(self.tracks[stable_id].get("cls_id", 0)),
+                "mask": mask,
             })
 
         # 输出短时 ghost 框，减少闪烁
@@ -261,6 +263,7 @@ class StablePersonTracker:
                     "confidence": float(track.get("last_conf", 0.0)),
                     "label": track.get("label", "person"),
                     "cls_id": int(track.get("cls_id", 0)),
+                    "mask": None,
                 })
 
         # 清理过期 track 和 raw id 映射
@@ -291,6 +294,15 @@ def _extract_persons_with_merge(result, image):
     track_ids = None
     if result.boxes.id is not None:
         track_ids = result.boxes.id.int().cpu().tolist()
+    masks = None
+    if result.masks is not None and result.masks.data is not None:
+        masks = result.masks.data.cpu().numpy()
+        if masks.shape[1:] != image.shape[:2]:
+            masks = np.stack([
+                cv2.resize(mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)
+                for mask in masks
+            ])
+        masks = masks > 0.5
 
     detections = []
     for i, (x1, y1, x2, y2) in enumerate(boxes_xyxy):
@@ -299,7 +311,8 @@ def _extract_persons_with_merge(result, image):
             "box": [int(x1), int(y1), int(x2), int(y2)],
             "cls_id": int(classes[i]),
             "conf": float(confs[i]),
-            "track_id": int(track_ids[i]) if track_ids is not None else None
+            "track_id": int(track_ids[i]) if track_ids is not None else None,
+            "mask": masks[i] if masks is not None and i < len(masks) else None,
         })
 
     n = len(detections)
@@ -353,6 +366,8 @@ def _extract_persons_with_merge(result, image):
             (detections[k]["conf"] for k in comp if detections[k]["cls_id"] == 0),
             default=max((detections[k]["conf"] for k in comp), default=0.0)
         )
+        component_masks = [detections[k]["mask"] for k in comp if detections[k]["mask"] is not None]
+        merged_mask = np.logical_or.reduce(component_masks) if component_masks else None
         persons.append({
             "box": [x1, y1, x2, y2],
             "raw_id": primary_id,
@@ -360,6 +375,7 @@ def _extract_persons_with_merge(result, image):
             "feat": _extract_hsv_feature(image, [x1, y1, x2, y2]),
             "label": "person",
             "cls_id": 0,
+            "mask": merged_mask,
         })
         merged_indices.update(comp)
 
@@ -378,6 +394,7 @@ def _extract_persons_with_merge(result, image):
             "feat": _extract_hsv_feature(image, det["box"]),
             "label": "person",
             "cls_id": 0,
+            "mask": det["mask"],
         })
 
     return persons
@@ -388,6 +405,12 @@ def draw_stable_persons(image, visible_items):
         sid = item["stable_id"]
         x1, y1, x2, y2 = item["box"].astype(int).tolist()
         color = _color_from_track_id(sid)
+        mask = item.get("mask")
+        if mask is not None and mask.shape == image.shape[:2] and np.any(mask):
+            image[mask] = (
+                0.65 * image[mask].astype(np.float32)
+                + 0.35 * np.asarray(color, dtype=np.float32)
+            ).astype(np.uint8)
         thickness = 3
         label = f"P{sid}"
         distance_m = item.get("distance_m")
@@ -480,20 +503,33 @@ def _estimate_pose_frame_step(frame_poses, total_video_frames, override_step):
     return max(1.0, float(total_video_frames) / float(pose_count))
 
 
-def _interpolate_pose(frame_poses, video_frame_idx, pose_frame_step):
+def _interpolate_pose(frame_poses, video_frame_idx, pose_frame_step, pose_video_frames=None):
     from scipy.spatial.transform import Rotation as R, Slerp
 
     if not frame_poses:
         return None
 
-    pose_index = float(video_frame_idx) / max(pose_frame_step, 1e-6)
-    pose_index = float(np.clip(pose_index, 0.0, len(frame_poses) - 1))
-    low = int(np.floor(pose_index))
-    high = int(np.ceil(pose_index))
+    if pose_video_frames is not None and len(pose_video_frames) == len(frame_poses):
+        high = int(np.searchsorted(pose_video_frames, video_frame_idx, side="left"))
+        if high <= 0:
+            return frame_poses[0]
+        if high >= len(frame_poses):
+            return frame_poses[-1]
+        if pose_video_frames[high] == video_frame_idx:
+            return frame_poses[high]
+        low = high - 1
+        low_frame = int(pose_video_frames[low])
+        high_frame = int(pose_video_frames[high])
+        alpha = float(video_frame_idx - low_frame) / max(high_frame - low_frame, 1)
+    else:
+        pose_index = float(video_frame_idx) / max(pose_frame_step, 1e-6)
+        pose_index = float(np.clip(pose_index, 0.0, len(frame_poses) - 1))
+        low = int(np.floor(pose_index))
+        high = int(np.ceil(pose_index))
+        alpha = float(pose_index - low)
     if low == high:
         return frame_poses[low]
 
-    alpha = float(pose_index - low)
     pose_a = frame_poses[low]
     pose_b = frame_poses[high]
     pos_w = (1.0 - alpha) * pose_a["pos_w"] + alpha * pose_b["pos_w"]
@@ -503,7 +539,7 @@ def _interpolate_pose(frame_poses, video_frame_idx, pose_frame_step):
     return {"ts": ts, "pos_w": pos_w, "rot_wc": rot_wc}
 
 
-def _build_export_context(map_path, frame_traj_path, total_video_frames, slam_frame_skip):
+def _build_export_context(map_path, frame_traj_path, total_video_frames, video_fps, slam_frame_skip):
     if not map_path or not frame_traj_path:
         return None
     if not os.path.isfile(map_path):
@@ -520,13 +556,73 @@ def _build_export_context(map_path, frame_traj_path, total_video_frames, slam_fr
         return None
     plane_point, plane_normal = _estimate_global_track_plane(keyframes)
     pose_frame_step = _estimate_pose_frame_step(frame_poses, total_video_frames, slam_frame_skip)
+    first_pose_ts = float(frame_poses[0]["ts"])
+    pose_video_frames = np.rint([
+        (float(pose["ts"]) - first_pose_ts) * float(video_fps) for pose in frame_poses
+    ]).astype(np.int64)
     return {
         "frame_poses": frame_poses,
+        "pose_video_frames": pose_video_frames,
         "plane_point": plane_point,
         "plane_normal": plane_normal,
         "pose_frame_step": pose_frame_step,
         "track_radius": 6.0,
     }
+
+
+def _build_adaptive_dap_frame_indices(
+    total_frames,
+    export_context,
+    sparse_skip=10,
+    turn_threshold_deg_per_frame=0.5,
+    turn_padding_frames=30,
+):
+    total_frames = max(0, int(total_frames))
+    sparse_skip = max(1, int(sparse_skip))
+    if total_frames == 0:
+        return [], []
+
+    selected = set(range(0, total_frames, sparse_skip))
+    selected.add(total_frames - 1)
+    if export_context is None:
+        return sorted(selected), []
+
+    poses = export_context.get("frame_poses", [])
+    pose_frames = np.asarray(export_context.get("pose_video_frames", []), dtype=np.int64)
+    if len(poses) != len(pose_frames) or len(poses) < 2:
+        return sorted(selected), []
+
+    dense_mask = np.zeros(total_frames, dtype=bool)
+    padding = max(0, int(turn_padding_frames))
+    for index in range(1, len(poses)):
+        start_frame = int(pose_frames[index - 1])
+        end_frame = int(pose_frames[index])
+        frame_gap = end_frame - start_frame
+        if frame_gap <= 0:
+            continue
+        relative_rotation = poses[index - 1]["rot_wc"].T @ poses[index]["rot_wc"]
+        cos_angle = np.clip((np.trace(relative_rotation) - 1.0) * 0.5, -1.0, 1.0)
+        rate = float(np.degrees(np.arccos(cos_angle))) / frame_gap
+        if rate < float(turn_threshold_deg_per_frame):
+            continue
+        dense_start = max(0, start_frame - padding)
+        dense_end = min(total_frames, end_frame + padding + 1)
+        dense_mask[dense_start:dense_end] = True
+
+    dense_frames = np.flatnonzero(dense_mask)
+    selected.update(dense_frames.tolist())
+
+    intervals = []
+    if dense_frames.size:
+        start = previous = int(dense_frames[0])
+        for frame_idx in dense_frames[1:]:
+            frame_idx = int(frame_idx)
+            if frame_idx > previous + 1:
+                intervals.append((start, previous))
+                start = frame_idx
+            previous = frame_idx
+        intervals.append((start, previous))
+    return sorted(selected), intervals
 
 
 def _panel_geometry_from_bbox(box, frame_width, frame_height):
@@ -550,37 +646,56 @@ def _panel_geometry_from_bbox(box, frame_width, frame_height):
     }
 
 
-def _depth_world_point_from_combined_depth(item, frame_idx, frame_width, frame_height, depth_frame, export_context):
-    if export_context is None or depth_frame is None:
-        return None
-
-    pose = _interpolate_pose(
-        export_context["frame_poses"],
-        frame_idx,
-        export_context["pose_frame_step"],
-    )
-    if pose is None:
-        return None
-
+def _sample_object_depth(item, depth_frame):
     x1, y1, x2, y2 = item["box"].astype(float).tolist()
     depth_h, depth_w = depth_frame.shape[:2]
     if depth_h <= 0 or depth_w <= 0:
         return None
 
-    # Sample the middle-lower bbox area, then use the median of the nearest 10% depths.
     rx1 = int(np.clip(round(x1 + 0.15 * (x2 - x1)), 0, depth_w - 1))
     ry1 = int(np.clip(round(y1 + 0.45 * (y2 - y1)), 0, depth_h - 1))
     rx2 = int(np.clip(round(x2 - 0.15 * (x2 - x1)), rx1 + 1, depth_w))
     ry2 = int(np.clip(round(y2 - 0.05 * (y2 - y1)), ry1 + 1, depth_h))
     depth_patch = depth_frame[ry1:ry2, rx1:rx2]
     valid = np.isfinite(depth_patch) & (depth_patch > 0)
+    depth_source = "bbox_nearest_10_percent"
+
+    mask = item.get("mask")
+    if mask is not None and mask.shape == depth_frame.shape[:2]:
+        mask_patch = mask[ry1:ry2, rx1:rx2].astype(np.uint8)
+        if mask_patch.size > 0:
+            mask_patch = cv2.erode(mask_patch, np.ones((3, 3), dtype=np.uint8), iterations=1)
+            masked_valid = valid & mask_patch.astype(bool)
+            if np.count_nonzero(masked_valid) >= 16:
+                valid = masked_valid
+                depth_source = "segmentation_mask_nearest_10_percent"
+
     if not np.any(valid):
         return None
-
     valid_depths = np.sort(depth_patch[valid].reshape(-1))
     nearest_count = max(1, int(np.ceil(0.10 * valid_depths.size)))
-    nearest_depths = valid_depths[:nearest_count]
-    depth_median = float(np.median(nearest_depths))
+    return {
+        "depth_median": float(np.median(valid_depths[:nearest_count])),
+        "depth_source": depth_source,
+        "depth_sample_count": int(valid_depths.size),
+    }
+
+
+def _depth_world_point_from_sample(item, frame_idx, frame_width, frame_height, depth_sample, export_context):
+    if export_context is None or depth_sample is None:
+        return None
+
+    pose = _interpolate_pose(
+        export_context["frame_poses"],
+        frame_idx,
+        export_context["pose_frame_step"],
+        export_context["pose_video_frames"],
+    )
+    if pose is None:
+        return None
+
+    x1, y1, x2, y2 = item["box"].astype(float).tolist()
+    depth_median = depth_sample["depth_median"]
     panel = _panel_geometry_from_bbox([x1, y1, x2, y2], frame_width, frame_height)
     if panel is None:
         return None
@@ -595,11 +710,15 @@ def _depth_world_point_from_combined_depth(item, frame_idx, frame_width, frame_h
     cx = 0.5 * panel_w
     cy = 0.5 * panel_h
 
-    point_panel = np.array([
-        (u_local - cx) / max(f, 1e-6) * depth_median,
-        (v_local - cy) / max(f, 1e-6) * depth_median,
-        depth_median,
+    ray_panel = np.array([
+        (u_local - cx) / max(f, 1e-6),
+        (v_local - cy) / max(f, 1e-6),
+        1.0,
     ], dtype=np.float64)
+    if export_context.get("depth_representation") == "radial":
+        point_panel = ray_panel / max(np.linalg.norm(ray_panel), 1e-6) * depth_median
+    else:
+        point_panel = ray_panel * depth_median
 
     yaw_centers_deg = [0.0, 90.0, 180.0, 270.0]
     yaw = np.deg2rad(yaw_centers_deg[view_idx])
@@ -622,11 +741,27 @@ def _depth_world_point_from_combined_depth(item, frame_idx, frame_width, frame_h
         "point_cam": point_cam.tolist(),
         "distance_m": distance_m,
         "depth_median": depth_median,
+        "depth_source": depth_sample["depth_source"],
+        "depth_sample_count": depth_sample["depth_sample_count"],
         "bearing_yaw_deg": bearing_yaw_deg,
         "bearing_pitch_deg": bearing_pitch_deg,
         "world_point": world_point.tolist(),
         "world_point_method": "median_depth_backprojection_from_perspective",
     }
+
+
+def _depth_world_point_from_combined_depth(item, frame_idx, frame_width, frame_height, depth_frame, export_context):
+    if export_context is None or depth_frame is None:
+        return None
+    depth_sample = _sample_object_depth(item, depth_frame)
+    return _depth_world_point_from_sample(
+        item,
+        frame_idx,
+        frame_width,
+        frame_height,
+        depth_sample,
+        export_context,
+    )
 
 
 def _attach_depth_metrics_to_visible_items(visible_items, frame_idx, frame_width, frame_height, depth_frame, export_context):
@@ -636,21 +771,10 @@ def _attach_depth_metrics_to_visible_items(visible_items, frame_idx, frame_width
     enriched_items = []
     for item in visible_items:
         enriched = dict(item)
-        x1, y1, x2, y2 = item["box"].astype(float).tolist()
-        depth_h, depth_w = depth_frame.shape[:2]
-        if depth_h > 0 and depth_w > 0:
-            rx1 = int(np.clip(round(x1 + 0.15 * (x2 - x1)), 0, depth_w - 1))
-            ry1 = int(np.clip(round(y1 + 0.45 * (y2 - y1)), 0, depth_h - 1))
-            rx2 = int(np.clip(round(x2 - 0.15 * (x2 - x1)), rx1 + 1, depth_w))
-            ry2 = int(np.clip(round(y2 - 0.05 * (y2 - y1)), ry1 + 1, depth_h))
-            depth_patch = depth_frame[ry1:ry2, rx1:rx2]
-            valid = np.isfinite(depth_patch) & (depth_patch > 0)
-            if np.any(valid):
-                valid_depths = np.sort(depth_patch[valid].reshape(-1))
-                nearest_count = max(1, int(np.ceil(0.10 * valid_depths.size)))
-                nearest_depths = valid_depths[:nearest_count]
-                enriched["depth_median"] = float(np.median(nearest_depths))
-                enriched["distance_m"] = enriched["depth_median"]
+        depth_sample = _sample_object_depth(item, depth_frame)
+        if depth_sample is not None:
+            enriched.update(depth_sample)
+            enriched["distance_m"] = enriched["depth_median"]
         extra = _depth_world_point_from_combined_depth(
             item,
             frame_idx,
@@ -660,7 +784,10 @@ def _attach_depth_metrics_to_visible_items(visible_items, frame_idx, frame_width
             export_context,
         )
         if extra is not None:
-            for key in ("point_cam", "distance_m", "depth_median", "world_point", "world_point_method", "view_idx", "local_center_xy"):
+            for key in (
+                "point_cam", "distance_m", "depth_median", "depth_source", "depth_sample_count",
+                "world_point", "world_point_method", "view_idx", "local_center_xy",
+            ):
                 if key in extra:
                     enriched[key] = extra[key]
         enriched_items.append(enriched)
@@ -675,6 +802,7 @@ def _world_point_from_plane(item, frame_idx, frame_width, frame_height, export_c
         export_context["frame_poses"],
         frame_idx,
         export_context["pose_frame_step"],
+        export_context["pose_video_frames"],
     )
     if pose is None:
         return None
@@ -768,6 +896,331 @@ def _build_track_export_item(item, frame_idx, frame_width, frame_height, export_
     return payload
 
 
+def _interpolate_dap_track_depths(
+    items,
+    frame_skip,
+    frame_width,
+    frame_height,
+    export_context,
+    dap_keyframe_indices=None,
+):
+    frame_skip = max(1, int(frame_skip))
+    keyframe_set = set(int(frame_idx) for frame_idx in (dap_keyframe_indices or []))
+    if frame_skip == 1 and not keyframe_set:
+        return items
+
+    tracks = {}
+    for item in items:
+        tracks.setdefault(int(item["stable_id"]), []).append(item)
+
+    corrected = 0
+    for track_items in tracks.values():
+        track_items.sort(key=lambda item: int(item["frame_idx"]))
+        anchors = [
+            item for item in track_items
+            if (int(item["frame_idx"]) in keyframe_set if keyframe_set
+                else int(item["frame_idx"]) % frame_skip == 0)
+            and np.isfinite(item.get("depth_median", np.nan))
+            and float(item["depth_median"]) > 0.0
+        ]
+        if len(anchors) < 2:
+            continue
+
+        anchor_frames = np.asarray([int(item["frame_idx"]) for item in anchors], dtype=np.int64)
+        anchor_depths = np.asarray([float(item["depth_median"]) for item in anchors], dtype=np.float64)
+        anchor_frame_set = set(anchor_frames.tolist())
+
+        for item in track_items:
+            frame_idx = int(item["frame_idx"])
+            if frame_idx in anchor_frame_set:
+                continue
+            high = int(np.searchsorted(anchor_frames, frame_idx, side="right"))
+            if high <= 0 or high >= len(anchors):
+                continue
+            low = high - 1
+            frame_gap = int(anchor_frames[high] - anchor_frames[low])
+            if frame_gap > 3 * frame_skip:
+                continue
+
+            alpha = float(frame_idx - anchor_frames[low]) / max(frame_gap, 1)
+            depth_median = float((1.0 - alpha) * anchor_depths[low] + alpha * anchor_depths[high])
+            depth_sample = {
+                "depth_median": depth_median,
+                "depth_source": "dap_track_interpolation_from_segmented_keyframes",
+                "depth_sample_count": int(min(
+                    anchors[low].get("depth_sample_count", 0),
+                    anchors[high].get("depth_sample_count", 0),
+                )),
+            }
+            item.update(depth_sample)
+            item["distance_m"] = depth_median
+
+            extra = _depth_world_point_from_sample(
+                {"box": np.asarray(item["bbox_xyxy"], dtype=np.float64)},
+                frame_idx,
+                frame_width,
+                frame_height,
+                depth_sample,
+                export_context,
+            )
+            if extra is not None:
+                item.update(extra)
+            corrected += 1
+
+    print(f"[INFO] Track-aware DAP interpolation corrected {corrected} skipped-frame depths.")
+    return items
+
+
+def _filter_world_tracks_kalman(
+    items,
+    export_context,
+    fps,
+    measurement_noise=0.35,
+    process_acceleration=3.0,
+    max_object_speed=12.0,
+):
+    if export_context is None:
+        raise ValueError("World-track filtering requires a valid metric map and frame trajectory")
+
+    fps = max(float(fps), 1e-6)
+    measurement_noise = max(float(measurement_noise), 1e-3)
+    process_acceleration = max(float(process_acceleration), 1e-3)
+    max_object_speed = max(float(max_object_speed), 0.1)
+    tracks = {}
+    for item in items:
+        tracks.setdefault(int(item["stable_id"]), []).append(item)
+
+    total_rejected = 0
+    measurement_matrix = np.hstack([np.eye(3), np.zeros((3, 3))])
+
+    def initial_covariance():
+        return np.diag([
+            measurement_noise ** 2 * 4.0,
+            measurement_noise ** 2 * 4.0,
+            measurement_noise ** 2 * 4.0,
+            (max_object_speed * 0.5) ** 2,
+            (max_object_speed * 0.5) ** 2,
+            (max_object_speed * 0.5) ** 2,
+        ])
+
+    def coherent_recovery(candidates):
+        required = 5
+        if len(candidates) < required:
+            return None
+        window = candidates[-required:]
+        frames = np.asarray([candidate[0] for candidate in window], dtype=np.float64)
+        positions = np.asarray([candidate[1] for candidate in window], dtype=np.float64)
+        frame_steps = np.diff(frames)
+        if np.any(frame_steps <= 0) or np.any(frame_steps > 3):
+            return None
+        step_speeds = np.linalg.norm(np.diff(positions, axis=0), axis=1) / (frame_steps / fps)
+        if np.any(step_speeds > max_object_speed):
+            return None
+
+        times = (frames - frames[0]) / fps
+        design = np.column_stack((np.ones_like(times), times))
+        coefficients, _, _, _ = np.linalg.lstsq(design, positions, rcond=None)
+        fitted = design @ coefficients
+        residuals = np.linalg.norm(positions - fitted, axis=1)
+        velocity = coefficients[1]
+        residual_limit = max(3.0 * measurement_noise, 0.25)
+        if float(np.max(residuals)) > residual_limit:
+            return None
+        if float(np.linalg.norm(velocity)) > max_object_speed:
+            return None
+        return fitted[-1], velocity, float(np.max(residuals))
+
+    for track_id, track_items in tracks.items():
+        track_items.sort(key=lambda item: int(item["frame_idx"]))
+        state = None
+        covariance = None
+        last_frame = None
+        last_accepted_measurement = None
+        last_accepted_frame = None
+        accepted_speeds = []
+        rejection_streak = 0
+        recovery_candidates = []
+        track_rejected = 0
+
+        for item in track_items:
+            if "world_point" not in item:
+                continue
+            frame_idx = int(item["frame_idx"])
+            measurement = np.asarray(
+                item.get("raw_world_point", item["world_point"]), dtype=np.float64
+            )
+            if measurement.shape != (3,) or not np.all(np.isfinite(measurement)):
+                continue
+
+            item.setdefault("raw_world_point", list(item["world_point"]))
+            item.setdefault("raw_point_cam", list(item.get("point_cam", [])))
+            item.setdefault("raw_distance_m", float(item.get("distance_m", np.nan)))
+            item.setdefault("raw_depth_median", float(item.get("depth_median", np.nan)))
+            item.setdefault("raw_depth_source", item.get("depth_source", "unknown"))
+            item.pop("filter_reinitialized", None)
+            item.pop("kalman_recovery_residual_m", None)
+            motion_clipped = False
+
+            if state is None:
+                state = np.zeros(6, dtype=np.float64)
+                state[:3] = measurement
+                covariance = initial_covariance()
+                last_frame = frame_idx
+                last_accepted_measurement = measurement.copy()
+                last_accepted_frame = frame_idx
+                rejected = False
+                innovation_norm = 0.0
+                mahalanobis = 0.0
+                speed_limit = max_object_speed
+                measured_speed = 0.0
+                rejection_reason = ""
+                recovery_gate = measurement_noise * 2.0
+                recovery_candidates.clear()
+            else:
+                previous_position = state[:3].copy()
+                dt = max((frame_idx - last_frame) / fps, 1.0 / fps)
+                transition = np.eye(6, dtype=np.float64)
+                transition[:3, 3:] = np.eye(3) * dt
+                dt2 = dt * dt
+                process_noise = np.block([
+                    [np.eye(3) * (0.25 * dt2 * dt2), np.eye(3) * (0.5 * dt2 * dt)],
+                    [np.eye(3) * (0.5 * dt2 * dt), np.eye(3) * dt2],
+                ]) * (process_acceleration ** 2)
+                state = transition @ state
+                covariance = transition @ covariance @ transition.T + process_noise
+
+                innovation = measurement - state[:3]
+                innovation_norm = float(np.linalg.norm(innovation))
+                source_scale = 2.0 if str(item["raw_depth_source"]).startswith(
+                    "dap_track_interpolation"
+                ) else 1.0
+                measurement_covariance = np.eye(3) * (measurement_noise * source_scale) ** 2
+                innovation_covariance = covariance[:3, :3] + measurement_covariance
+                mahalanobis = float(innovation @ np.linalg.solve(innovation_covariance, innovation))
+
+                history = np.asarray(accepted_speeds[-60:], dtype=np.float64)
+                if history.size >= 5:
+                    median_speed = float(np.median(history))
+                    speed_mad = float(np.median(np.abs(history - median_speed)))
+                    speed_limit = min(
+                        max_object_speed,
+                        max(8.0, median_speed + 6.0 * 1.4826 * max(speed_mad, 0.1)),
+                    )
+                else:
+                    speed_limit = max_object_speed
+                accepted_dt = max((frame_idx - last_accepted_frame) / fps, 1.0 / fps)
+                measured_speed = float(
+                    np.linalg.norm(measurement - last_accepted_measurement) / accepted_dt
+                )
+                speed_rejected = measured_speed > speed_limit
+                innovation_rejected = mahalanobis > 16.27
+                recovery_gate = measurement_noise * source_scale * 2.0
+                recovery_rejected = rejection_streak > 0 and innovation_norm > recovery_gate
+                rejected = speed_rejected or innovation_rejected or recovery_rejected
+                rejection_reason = "+".join(
+                    reason for reason, active in (
+                        ("speed", speed_rejected),
+                        ("innovation", innovation_rejected),
+                        ("recovery", recovery_rejected),
+                    ) if active
+                )
+
+                if rejected:
+                    rejection_streak += 1
+                    if (
+                        recovery_candidates
+                        and frame_idx - recovery_candidates[-1][0] > 3
+                    ):
+                        recovery_candidates.clear()
+                    recovery_candidates.append((frame_idx, measurement.copy()))
+                    recovery_candidates = recovery_candidates[-5:]
+                    recovery = coherent_recovery(recovery_candidates)
+                    if recovery is not None:
+                        recovered_position, recovered_velocity, recovery_residual = recovery
+                        recovery_step = recovered_position - previous_position
+                        recovery_step_norm = float(np.linalg.norm(recovery_step))
+                        max_recovery_step = max_object_speed * dt
+                        if recovery_step_norm > max_recovery_step:
+                            recovery_step *= max_recovery_step / recovery_step_norm
+                            motion_clipped = True
+                        state[:3] = previous_position + recovery_step
+                        state[3:] = recovered_velocity
+                        covariance = initial_covariance()
+                        accepted_speeds.append(float(np.linalg.norm(recovered_velocity)))
+                        last_accepted_measurement = measurement.copy()
+                        last_accepted_frame = frame_idx
+                        rejection_streak = 0
+                        recovery_candidates.clear()
+                        rejected = False
+                        rejection_reason = ""
+                        item["filter_reinitialized"] = True
+                        item["kalman_recovery_residual_m"] = recovery_residual
+                    else:
+                        track_rejected += 1
+                        total_rejected += 1
+                        state[3:] *= float(np.exp(-dt / 0.5))
+                else:
+                    kalman_gain = covariance[:, :3] @ np.linalg.inv(innovation_covariance)
+                    state = state + kalman_gain @ innovation
+                    covariance = (np.eye(6) - kalman_gain @ measurement_matrix) @ covariance
+
+                    max_step = max_object_speed * dt
+                    position_step = state[:3] - previous_position
+                    position_step_norm = float(np.linalg.norm(position_step))
+                    if position_step_norm > max_step:
+                        state[:3] = previous_position + position_step * (max_step / position_step_norm)
+                        motion_clipped = True
+
+                    velocity_norm = float(np.linalg.norm(state[3:]))
+                    if velocity_norm > max_object_speed:
+                        state[3:] *= max_object_speed / velocity_norm
+                        motion_clipped = True
+
+                    accepted_speeds.append(measured_speed)
+                    last_accepted_measurement = measurement.copy()
+                    last_accepted_frame = frame_idx
+                    rejection_streak = 0
+                    recovery_candidates.clear()
+                last_frame = frame_idx
+
+            pose = _interpolate_pose(
+                export_context["frame_poses"],
+                frame_idx,
+                export_context["pose_frame_step"],
+                export_context["pose_video_frames"],
+            )
+            filtered_world = state[:3]
+            point_cam = pose["rot_wc"].T @ (filtered_world - pose["pos_w"])
+            distance_m = float(np.linalg.norm(point_cam))
+            item.update({
+                "point_cam": point_cam.tolist(),
+                "distance_m": distance_m,
+                "depth_median": distance_m,
+                "depth_source": "kalman_world_track_filter",
+                "bearing_yaw_deg": float(np.degrees(np.arctan2(point_cam[0], point_cam[2]))),
+                "bearing_pitch_deg": float(np.degrees(np.arctan2(
+                    point_cam[1], np.linalg.norm(point_cam[[0, 2]])
+                ))),
+                "world_point": filtered_world.tolist(),
+                "world_point_method": "robust_kalman_world_track",
+                "measurement_rejected": bool(rejected),
+                "kalman_innovation_m": innovation_norm,
+                "kalman_mahalanobis": mahalanobis,
+                "kalman_speed_limit_mps": speed_limit,
+                "kalman_measured_speed_mps": measured_speed,
+                "kalman_motion_clipped": bool(motion_clipped),
+                "kalman_recovery_gate_m": recovery_gate,
+                "measurement_rejection_reason": rejection_reason,
+            })
+
+        print(
+            f"[INFO] Kalman world-track filter: track={track_id}, "
+            f"measurements={len(track_items)}, rejected={track_rejected}"
+        )
+    print(f"[INFO] Kalman world-track filter complete: rejected={total_rejected}")
+    return items
+
+
 def _save_track_export(path, video_path, total_frames, fps, frame_width, frame_height, items, export_context=None):
     parent_dir = os.path.dirname(path)
     if parent_dir:
@@ -791,11 +1244,26 @@ def _save_track_export(path, video_path, total_frames, fps, frame_width, frame_h
             "ray_world",
             "point_cam",
             "depth_median",
+            "depth_source",
+            "depth_sample_count",
             "distance_m",
             "bearing_yaw_deg",
             "bearing_pitch_deg",
             "world_point",
             "world_point_method",
+            "raw_world_point",
+            "raw_point_cam",
+            "raw_distance_m",
+            "raw_depth_median",
+            "raw_depth_source",
+            "measurement_rejected",
+            "kalman_innovation_m",
+            "kalman_mahalanobis",
+            "kalman_speed_limit_mps",
+            "kalman_measured_speed_mps",
+            "kalman_motion_clipped",
+            "kalman_recovery_gate_m",
+            "measurement_rejection_reason",
         ):
             if key in item:
                 entry[key] = item[key]
@@ -1675,13 +2143,22 @@ def _resolve_aux_output_dir(video_path, output_arg, suffix_name):
     return aux_dir
 
 
-def _load_dap_panorama_depth_cache(video_path, output_arg, frame_skip=1, max_depth=None):
+def _load_dap_panorama_depth_cache(
+    video_path,
+    output_arg,
+    frame_skip=1,
+    max_depth=None,
+    frame_indices=None,
+    cache_tag=None,
+):
     script_dir = Path(__file__).resolve().parent
     repo_root = script_dir.parent
     dap_infer_script = repo_root / "third_part" / "DAP" / "test" / "infer.py"
     dap_config_path = repo_root / "third_part" / "DAP" / "config" / "infer.yaml"
     frame_skip = max(1, int(frame_skip))
-    suffix_name = "dap_depth" if frame_skip == 1 else f"dap_depth_fs{frame_skip}"
+    suffix_name = f"dap_depth_{cache_tag}" if cache_tag else (
+        "dap_depth" if frame_skip == 1 else f"dap_depth_fs{frame_skip}"
+    )
     if max_depth is not None:
         if float(max_depth).is_integer():
             max_depth_tag = str(int(max_depth))
@@ -1691,8 +2168,28 @@ def _load_dap_panorama_depth_cache(video_path, output_arg, frame_skip=1, max_dep
     dap_output_dir = Path(_resolve_aux_output_dir(video_path, output_arg, suffix_name))
     depth_npy_dir = dap_output_dir / "depth_npy"
 
-    _, txt_path, total_frames = _ensure_video_frame_exports_from_video(video_path)
-    frame_indices = list(range(0, total_frames, frame_skip))
+    frame_dir, txt_path, total_frames = _ensure_video_frame_exports_from_video(video_path)
+    custom_schedule = frame_indices is not None
+    if custom_schedule:
+        frame_indices = sorted(set(
+            int(frame_idx) for frame_idx in frame_indices
+            if 0 <= int(frame_idx) < total_frames
+        ))
+    else:
+        frame_indices = list(range(0, total_frames, frame_skip))
+    if not frame_indices:
+        raise RuntimeError("DAP frame schedule is empty")
+
+    infer_txt_path = txt_path
+    infer_frame_skip = frame_skip
+    if custom_schedule:
+        infer_txt_path = dap_output_dir / "selected_frames.txt"
+        with infer_txt_path.open("w", encoding="utf-8") as f:
+            for frame_idx in frame_indices:
+                frame_path = frame_dir / f"{frame_idx + 1:05d}.png"
+                f.write(f"{frame_path}\n")
+        infer_frame_skip = 1
+
     existing_npys = sorted(depth_npy_dir.glob("*.npy")) if depth_npy_dir.exists() else []
     expected_stems = [f"{frame_idx + 1:05d}" for frame_idx in frame_indices]
     existing_stems = [path.stem for path in existing_npys]
@@ -1708,17 +2205,19 @@ def _load_dap_panorama_depth_cache(video_path, output_arg, frame_skip=1, max_dep
                 f"[INFO] DAP depth cache incomplete or mismatched, rerunning inference: "
                 f"expected {len(frame_indices)} files, found {len(existing_npys)}"
             )
+            for stale_npy in existing_npys:
+                stale_npy.unlink()
         cmd = [
             sys.executable,
             str(dap_infer_script),
             "--config",
             str(dap_config_path),
             "--txt",
-            str(txt_path),
+            str(infer_txt_path),
             "--output",
             str(dap_output_dir),
             "--frame_skip",
-            str(frame_skip),
+            str(infer_frame_skip),
         ]
         if max_depth is not None:
             cmd.extend(["--max_depth", str(max_depth)])
@@ -1745,7 +2244,9 @@ def _load_dap_panorama_depth_cache(video_path, output_arg, frame_skip=1, max_dep
         depth = np.load(str(npy_path)).astype(np.float32)
         valid = np.isfinite(depth) & (depth > 0)
         if np.any(valid):
-            vis_values.append(depth[valid])
+            values = depth[valid]
+            sample_step = max(1, int(np.ceil(values.size / 10000)))
+            vis_values.append(values[::sample_step])
 
     vis_min = None
     vis_max = None
@@ -1826,12 +2327,24 @@ def _build_four_view_display_from_frame(frame, angles, labels, slice_h, slice_w)
     return np.hstack(display_views)
 
 
-def _infer_depth_frames_dap(video_path, output_arg, angles, slice_h, slice_w, frame_skip=1, max_depth=None):
+def _infer_depth_frames_dap(
+    video_path,
+    output_arg,
+    angles,
+    slice_h,
+    slice_w,
+    frame_skip=1,
+    max_depth=None,
+    frame_indices=None,
+    cache_tag=None,
+):
     dap_cache = _load_dap_panorama_depth_cache(
         video_path,
         output_arg,
         frame_skip=frame_skip,
         max_depth=max_depth,
+        frame_indices=frame_indices,
+        cache_tag=cache_tag,
     )
     dap_vis = _load_dap_visualization_settings()
 
@@ -1936,8 +2449,11 @@ def get_four_views_combined(equ_manager, fov=90, h=720, w=1080):
 def run_video_multi_view(video_path, video_save_path='output_object_detection.mp4', track_save_path=None,
                          map_path=None, frame_traj_path=None, slam_frame_skip=None,
                          with_depth=True, depth_encoder="vitl", depth_metric=False, depth_input_size=518,
-                         depth_model="video_da2", max_depth=None,
-                         merge_max_width=640, merge_max_height=320, merge_workers=1, frame_skip=1):
+                         depth_model="dap", max_depth=None,
+                         merge_max_width=640, merge_max_height=320, merge_workers=1, frame_skip=1,
+                         adaptive_dap=False, dap_turn_threshold=0.5, dap_turn_padding=30,
+                         kalman_filter=False, track_measurement_noise=0.35,
+                         track_process_acceleration=3.0, track_max_speed=12.0):
     if track_save_path is None:
         track_save_path = _default_path_from_video(video_path, "object_tracks.json")
     if map_path is None:
@@ -1950,9 +2466,8 @@ def run_video_multi_view(video_path, video_save_path='output_object_detection.mp
     _export_split_view_videos(video_path, video_save_path, split_angles, 480, 640)
 
     # 1. 加载 YOLO 模型 (确保已安装 ultralytics: pip install ultralytics)
-    # 建议使用 yolov8n.pt 以获得最快速度
-    model = YOLO('yolov8n.pt') 
-    shifted_model = YOLO('yolov8n.pt') if with_depth and depth_model == "video_da2" else None
+    model = YOLO('yolov8n-seg.pt')
+    shifted_model = YOLO('yolov8n-seg.pt') if with_depth and depth_model == "video_da2" else None
     
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -1999,9 +2514,44 @@ def run_video_multi_view(video_path, video_save_path='output_object_detection.mp
     )
     frame_idx = 0
     exported_track_items = []
-    export_context = _build_export_context(map_path, frame_traj_path, total_frames, slam_frame_skip)
+    export_context = _build_export_context(
+        map_path, frame_traj_path, total_frames, original_fps, slam_frame_skip
+    )
+    if kalman_filter and export_context is None:
+        raise ValueError(
+            "--kalman_filter requires valid metric SLAM inputs: "
+            f"--map-path={map_path!r}, --frame-traj-path={frame_traj_path!r}"
+        )
+    if export_context is not None:
+        export_context["depth_representation"] = "radial" if depth_model == "dap" else "z"
     if track_save_path and export_context is None:
         print("[INFO] Saving 2D/depth track export without world coordinates.")
+    adaptive_frame_indices = None
+    adaptive_cache_tag = None
+    if with_depth and depth_model == "dap" and adaptive_dap:
+        if export_context is None:
+            print("[WARN] Adaptive DAP requires a valid SLAM trajectory; using fixed frame skip.")
+        else:
+            adaptive_frame_indices, dense_intervals = _build_adaptive_dap_frame_indices(
+                total_frames,
+                export_context,
+                sparse_skip=frame_skip,
+                turn_threshold_deg_per_frame=dap_turn_threshold,
+                turn_padding_frames=dap_turn_padding,
+            )
+            threshold_tag = f"{float(dap_turn_threshold):g}".replace(".", "p")
+            adaptive_cache_tag = (
+                f"adaptive_fs{max(1, int(frame_skip))}_t{threshold_tag}_p{max(0, int(dap_turn_padding))}"
+            )
+            intervals_text = ", ".join(f"{start}-{end}" for start, end in dense_intervals) or "none"
+            print(
+                f"[INFO] Adaptive DAP schedule: {len(adaptive_frame_indices)}/{total_frames} frames, "
+                f"straight skip={max(1, int(frame_skip))}, turns skip=1"
+            )
+            print(
+                f"[INFO] Turn threshold={float(dap_turn_threshold):g} deg/frame, "
+                f"padding={max(0, int(dap_turn_padding))} frames, dense intervals: {intervals_text}"
+            )
     progress = None
     base_debug_out = None
     shifted_debug_out = None
@@ -2016,6 +2566,8 @@ def run_video_multi_view(video_path, video_save_path='output_object_detection.mp
                 slice_w,
                 frame_skip=frame_skip,
                 max_depth=max_depth,
+                frame_indices=adaptive_frame_indices,
+                cache_tag=adaptive_cache_tag,
             )
             total_frames = depth_state["total_frames"]
             frame_source = None
@@ -2173,6 +2725,7 @@ def run_video_multi_view(video_path, video_save_path='output_object_detection.mp
             iou=0.6,
             tracker='bytetrack.yaml',
             persist=True,
+            retina_masks=True,
             verbose=False
         )
 
@@ -2212,6 +2765,7 @@ def run_video_multi_view(video_path, video_save_path='output_object_detection.mp
                     iou=0.6,
                     tracker='bytetrack.yaml',
                     persist=True,
+                    retina_masks=True,
                     verbose=False
                 )
                 if shifted_results and len(shifted_results) > 0:
@@ -2292,6 +2846,24 @@ def run_video_multi_view(video_path, video_save_path='output_object_detection.mp
     if progress is not None:
         progress.close()
     if track_save_path:
+        if with_depth and depth_model == "dap":
+            exported_track_items = _interpolate_dap_track_depths(
+                exported_track_items,
+                frame_skip,
+                combined_w,
+                combined_h,
+                export_context,
+                dap_keyframe_indices=depth_state["dap_cache"]["keyframe_indices"],
+            )
+        if kalman_filter:
+            exported_track_items = _filter_world_tracks_kalman(
+                exported_track_items,
+                export_context,
+                original_fps,
+                measurement_noise=track_measurement_noise,
+                process_acceleration=track_process_acceleration,
+                max_object_speed=track_max_speed,
+            )
         _save_track_export(
             track_save_path,
             video_path=video_path,
@@ -2462,9 +3034,9 @@ def parse_args():
     )
     parser.add_argument(
         "--depth-model",
-        choices=["video_da2", "dap"],
-        default="video_da2",
-        help="Depth backend. 'video_da2' keeps the existing four-view pipeline; 'dap' infers depth on ERP frames first.",
+        choices=["dap"],
+        default="dap",
+        help="Depth backend. DAP infers depth directly on ERP frames.",
     )
     parser.add_argument(
         "--max_depth",
@@ -2499,7 +3071,47 @@ def parse_args():
         "--frame-skip", "--frame_skip",
         type=int,
         default=1,
-        help="Apply frame skipping only during Poisson fusion; skipped frames are filled by temporal interpolation.",
+        help="Sparse depth inference interval. Skipped frames are filled by temporal interpolation.",
+    )
+    parser.add_argument(
+        "--adaptive-dap",
+        action="store_true",
+        help="Use the SLAM rotation trajectory to run DAP densely around turns and sparsely elsewhere.",
+    )
+    parser.add_argument(
+        "--dap-turn-threshold",
+        type=float,
+        default=0.5,
+        help="Angular velocity threshold in degrees per video frame for adaptive DAP.",
+    )
+    parser.add_argument(
+        "--dap-turn-padding",
+        type=int,
+        default=30,
+        help="Number of dense DAP frames added before and after detected turns.",
+    )
+    parser.add_argument(
+        "--kalman_filter",
+        action="store_true",
+        help="Apply causal robust Kalman filtering and reject implausible world-point measurements.",
+    )
+    parser.add_argument(
+        "--track-measurement-noise",
+        type=float,
+        default=0.35,
+        help="World-point measurement noise standard deviation in meters.",
+    )
+    parser.add_argument(
+        "--track-process-acceleration",
+        type=float,
+        default=3.0,
+        help="Constant-velocity Kalman process acceleration in meters per second squared.",
+    )
+    parser.add_argument(
+        "--track-max-speed",
+        type=float,
+        default=12.0,
+        help="Maximum plausible tracked-object speed in meters per second.",
     )
     return parser.parse_args()
 
@@ -2524,6 +3136,13 @@ if __name__ == '__main__':
         merge_max_height=args.merge_max_height,
         merge_workers=args.merge_workers,
         frame_skip=args.frame_skip,
+        adaptive_dap=args.adaptive_dap,
+        dap_turn_threshold=args.dap_turn_threshold,
+        dap_turn_padding=args.dap_turn_padding,
+        kalman_filter=args.kalman_filter,
+        track_measurement_noise=args.track_measurement_noise,
+        track_process_acceleration=args.track_process_acceleration,
+        track_max_speed=args.track_max_speed,
     )
 
     # run_yolo_on_pano(video_path)
