@@ -21,7 +21,6 @@ import tools.Equirec2Perspec as E2P
 
 DEFAULT_CAM0_VIDEO = REPO_ROOT / "data/ricoh/cali/cam_1/aprilgrid.MP4"
 DEFAULT_CAM1_VIDEO = REPO_ROOT / "data/ricoh/cali/cam_2/aprilgrid.MP4"
-DEFAULT_TARGET = REPO_ROOT / "aprilgrid_6x6_a4.yaml"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "data/ricoh/cali/kalibr_virtual_front"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
 
@@ -91,13 +90,11 @@ def prepare_virtual_pinhole_dataset(args):
 
     cam0_video = _check_file(args.cam0_video, "cam0 video")
     cam1_video = _check_file(args.cam1_video, "cam1 video")
-    target = _check_file(args.target, "target yaml")
 
     info0 = _video_info(cam0_video)
     info1 = _video_info(cam1_video)
     print(f"cam0: {info0['width']}x{info0['height']} {info0['fps']:.3f} fps, {info0['duration']:.2f}s")
     print(f"cam1: {info1['width']}x{info1['height']} {info1['fps']:.3f} fps, {info1['duration']:.2f}s")
-    print(f"target: {target}")
 
     duration = min(info0["duration"], info1["duration"])
     start_s = max(0.0, float(args.start_s))
@@ -156,7 +153,6 @@ def prepare_virtual_pinhole_dataset(args):
 def prepare_virtual_pinhole_dataset_from_frames(args):
     cam0_dir = _check_dir(args.cam0_frames_dir, "cam0 frames dir")
     cam1_dir = _check_dir(args.cam1_frames_dir, "cam1 frames dir")
-    target = _check_file(args.target, "target yaml")
     cam0_images = _list_images(cam0_dir)
     cam1_images = _list_images(cam1_dir)
     available_count = min(len(cam0_images), len(cam1_images))
@@ -181,7 +177,6 @@ def prepare_virtual_pinhole_dataset_from_frames(args):
 
     print(f"cam0 frames: {cam0_dir} ({len(cam0_images)})")
     print(f"cam1 frames: {cam1_dir} ({len(cam1_images)})")
-    print(f"target: {target}")
 
     for pair_idx in tqdm(selected_indices, desc="Converting perspective frames", unit="pair"):
         cam0_path = cam0_images[pair_idx]
@@ -226,9 +221,12 @@ def _repo_relative(path):
 
 
 def run_kalibr(args):
+    if not args.target:
+        raise ValueError("--target is required when --run-kalibr is enabled")
+
     output_dir = Path(args.output_dir).resolve()
     bag_path = output_dir.with_suffix(".bag")
-    target_path = Path(args.target).resolve()
+    target_path = _check_file(args.target, "target yaml").resolve()
 
     docker_cmd = [
         "docker",
@@ -283,7 +281,11 @@ def parse_args():
         default=None,
         help="Select this many evenly spaced synchronized pairs; default uses all pairs",
     )
-    parser.add_argument("--target", default=str(DEFAULT_TARGET))
+    parser.add_argument(
+        "--target",
+        default=None,
+        help="Kalibr target YAML; only required together with --run-kalibr",
+    )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--start-s", type=float, default=0.0)
     parser.add_argument("--end-s", type=float, default=None)
