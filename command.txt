@@ -1,0 +1,270 @@
+conda activate arrow
+
+
+aist_entrance_hall_1
+aist_store_2
+arrow360/VIDEO_0665
+
+xhost +local:
+
+
+docker run -it --rm --privileged \
+    -e DISPLAY=$DISPLAY \
+    -v /tmp/.X11-unix/:/tmp/.X11-unix:ro \
+    -v ~/Documents/project/arrow:/work \
+    stella_vslam-iridescence
+
+docker run -it --rm --privileged \
+    -e DISPLAY=$DISPLAY \
+    -v /tmp/.X11-unix/:/tmp/.X11-unix:ro \
+    -v ~/Documents/project/arrow:/work \
+    --gpus all \
+    stella_vslam-desktop
+
+
+/stella_vslam_examples/build/run_video_slam \
+    -v /work/orb_vocab.fbow \
+    -c /work/data/arrow360/VIDEO_0665/config.yaml \
+    -m /work/data/arrow360/VIDEO_0665/video.mp4 \
+    --frame-skip 2 \
+    --no-sleep \
+    --eval-log-dir /work/data/arrow360/VIDEO_0665/ \
+    --map-db-out /work/data/arrow360/VIDEO_0665/my_saved_map.msg
+
+evo_traj tum data/arrow360/VIDEO_0665/frame_trajectory.txt --ref data/arrow360/VIDEO_0665/keyframe_trajectory.txt -p --plot_mode=xyz
+
+/stella_vslam_examples/build/run_video_slam \
+    --disable-mapping \
+    -v /work/orb_vocab.fbow \
+    -c /work/data/arrow360/VIDEO_0665/config.yaml \
+    -m /work/data/arrow360/VIDEO_0665/video.mp4 \
+    --frame-skip 2 \
+    --map-db-in /work/data/arrow360/VIDEO_0665/my_saved_map.msg
+
+###################################### 
+date: 2026.01.14 progress meeting demo:
+
+conda activate arrow
+
+xhost +SI:localuser:root
+
+docker run -it --rm --privileged \
+    -e DISPLAY=$DISPLAY \
+    -v /tmp/.X11-unix/:/tmp/.X11-unix:ro \
+    -v ~/Documents/project/arrow:/work \
+    --gpus all \
+    stella_vslam-desktop
+
+/stella_vslam_examples/build/run_video_slam \
+    -v /work/orb_vocab.fbow \
+    -c /work/data/arrow360/VIDEO_0665/config.yaml \
+    -m /work/data/arrow360/VIDEO_0665/video.mp4 \
+    --frame-skip 2 \
+    --no-sleep \
+    --eval-log-dir /work/data/arrow360/VIDEO_0665/ \
+    --map-db-out /work/data/arrow360/VIDEO_0665/my_saved_map.msg
+
+# 这里直接可视化之前输出的轨迹
+/stella_vslam_examples/build/run_video_slam \
+    --disable-mapping \
+    -v /work/orb_vocab.fbow \
+    -c /work/data/arrow360/VIDEO_0665/config.yaml \
+    -m /work/data/arrow360/VIDEO_0665/video.mp4 \
+    --frame-skip 2 \
+    --map-db-in /work/data/arrow360/VIDEO_0665/my_saved_map.msg
+
+
+###################################### 
+date: 2026.02.11 progress meeting demo:
+
+conda activate arrow
+python3 visualize_map.py --map data/arrow360/VIDEO_0665/my_saved_map.msg --frame-ms 500 --no-follow-view
+
+python tools/equirec2perspec_video.py --output output/arrow360/VIDEO_0665
+
+
+
+###################################### 
+date: 2026.03.17 progress meeting demo:
+
+
+python3 visualize_map_gui.py \
+  --map data/arrow360/VIDEO_0665/my_saved_map.msg \
+  --fps 30 \
+  --tracks-json data/arrow360/VIDEO_0665/object_tracks.json \
+  --frame-traj data/arrow360/VIDEO_0665/frame_trajectory.txt \
+  --slam-frame-skip 2
+
+
+
+###################################### 
+date: 2026.04.08 progress meeting demo:
+
+# python3 third_part/video_da2/run_360.py --input_video ./data/arrow360/VIDEO_0665/video_30s.mp4 --output_dir ./output  --encoder vitl --metric
+
+docker run -it --rm --privileged \
+    -e DISPLAY=$DISPLAY \
+    -v /tmp/.X11-unix/:/tmp/.X11-unix:ro \
+    -v ~/Documents/project/arrow:/work \
+    --gpus all \
+    stella_vslam-desktop
+
+/stella_vslam_examples/build/run_video_slam \
+    -v /work/orb_vocab.fbow \
+    -c /work/data/arrow360/VIDEO_0665/config.yaml \
+    -m /work/data/arrow360/VIDEO_0665/video_30s.mp4 \
+    --frame-skip 1 \
+    --no-sleep \
+    --eval-log-dir /work/data/arrow360/VIDEO_0665/ \
+    --map-db-out /work/data/arrow360/VIDEO_0665/my_saved_map.msg
+
+
+# 进行深度推理
+# 方法1：
+python tools/equirec2perspec_video.py \
+  --video ./data/arrow360/VIDEO_0665/video_30s.mp4 \
+  --output ./output/arrow360/VIDEO_0665 \
+  --metric \
+  --depth-model video_da2
+
+# 方法2：
+ffmpeg -i data/arrow360/VIDEO_0665/video_10s.mp4 -q:v 2 data/arrow360/VIDEO_0665/video_10s_images/%05d.png
+find data/arrow360/VIDEO_0665/video_10s_images -name '*.png' | sort > data/arrow360/VIDEO_0665/video_10s_images.txt
+
+python tools/equirec2perspec_video.py \
+  --video ./data/arrow360/VIDEO_0665/video_10s.mp4 \
+  --output ./output/arrow360/VIDEO_0665 \
+  --depth-model dap \
+  --frame_skip 10 \
+  --max_depth 100
+
+
+######################   这下面的3条是单独使用的  ############################ 
+python third_part/DAP/test/infer.py \
+  --config config/infer.yaml \
+  --txt data/arrow360/VIDEO_0665/video_10s_images.txt \
+  --output output/arrow360/VIDEO_0665/video_10s \
+  --frame_skip 10 \
+  --max_depth 100
+
+python third_part/DAP/depth2point.py \
+  --depth_dir output/arrow360/VIDEO_0665/video_30s_dap_depth_fs10_md100/depth_npy \
+  --image_dir data/arrow360/VIDEO_0665/video_30s_images \
+  --mask_dir output/arrow360/VIDEO_0665/video_30s_dap_depth_fs10_md100/mask_vis_valid \
+  --out_dir output/arrow360/VIDEO_0665/video_30s_dap_depth_fs10_md100/ply \
+  --max_points 100000
+
+python third_part/DAP/vis_ply.py --ply_dir output/arrow360/VIDEO_0665/video_30s_dap_depth_fs10_md100/ply --point_size 2
+
+###########################################################################
+
+
+
+
+# presentation demo:
+python third_part/DAP/vis_ply.py --ply_dir output/arrow360/VIDEO_0665/video_30s_dap_depth_fs10_md100/ply --point_size 2
+
+Meta Summit 2026 presentation demo:
+
+python3 visualize_map_gui.py \
+  --map data/arrow360/VIDEO_0665/my_saved_map.msg \
+  --fps 30 \
+  --tracks-json data/arrow360/VIDEO_0665/object_tracks.json \
+  --frame-traj data/arrow360/VIDEO_0665/frame_trajectory.txt \
+  --slam-frame-skip 1 \
+  --overlay-video output/arrow360/VIDEO_0665/video_30s_object_detection.mp4
+
+
+tools/equirec2perspec_video.py
+
+###########################################################################
+
+
+###################################### 
+date: 2026.06.10 progress meeting demo:
+
+docker run -it --rm --privileged \
+    -e DISPLAY=$DISPLAY \
+    -v /tmp/.X11-unix/:/tmp/.X11-unix:ro \
+    -v ~/Documents/project/arrow:/work \
+    --gpus all \
+    stella_vslam-desktop
+
+
+/stella_vslam_examples/build/run_video_slam \
+    -v /work/orb_vocab.fbow \
+    -c /work/data/ricoh/R0010003/config.yaml \
+    -m /work/data/ricoh/R0010003/video.mp4 \
+    --frame-skip 2 \
+    --no-sleep \
+    --eval-log-dir /work/data/ricoh/R0010003/ \
+    --map-db-out /work/data/ricoh/R0010003/my_saved_map.msg
+
+
+ffmpeg -i data/ricoh/R0010003/video.mp4 -q:v 2 data/ricoh/R0010003/images/%05d.png
+find data/ricoh/R0010003/images -name '*.png' | sort > data/ricoh/R0010003/images.txt
+
+# 运行DAP进行深度推理
+conda activate dap
+
+# optional:这个是没有object detection的版本，直接对输入视频进行深度推理
+python third_part/DAP/test/infer.py \
+  --config third_part/DAP/config/infer.yaml \
+  --txt data/ricoh/R0010003/images.txt \
+  --output output/ricoh/R0010003/video \
+  --frame_skip 10 \
+  --max_depth 100
+
+# optional:推理点云并可视化
+python third_part/DAP/depth2point.py \
+  --depth_dir output/ricoh/R0010003/video/depth_npy \
+  --image_dir data/ricoh/R0010003/images \
+  --mask_dir output/ricoh/R0010003/video/mask_vis_valid \
+  --out_dir output/ricoh/R0010003/video/ply \
+  --max_points 100000
+
+# optional:可视化点云
+python third_part/DAP/vis_ply.py --ply_dir output/ricoh/R0010003/video/ply --point_size 2
+
+# 进行四个视角的object detection
+python tools/equirec2perspec_video.py \
+  --video data/ricoh/R0010003/video.mp4 \
+  --output output/ricoh/R0010003 \
+  --track-output data/ricoh/R0010003/object_tracks.json \
+  --map-path data/ricoh/R0010003/my_saved_map.msg \
+  --frame-traj-path data/ricoh/R0010003/frame_trajectory.txt \
+  --slam-frame-skip 2 \
+  --depth-model dap \
+  --frame_skip 10 \
+  --max_depth 100
+
+
+python tools/equirec2perspec_video.py \
+  --video data/arrow360/GS010020/video_30s.mp4 \
+  --output output/arrow360/GS010020 \
+  --track-output data/arrow360/GS010020/object_tracks.json \
+  --map-path data/arrow360/GS010020/my_saved_map.msg \
+  --frame-traj-path data/arrow360/GS010020/frame_trajectory.txt \
+  --slam-frame-skip 2 \
+  --depth-model dap \
+  --frame_skip 10 \
+  --max_depth 100
+
+ython3 tools/crop_video.py \
+#   --video-path data/arrow360/GS010020/video.mp4 \
+#   --start-time 04:30 \
+#   --end-time 05:00 \
+#   --output-path data/arrow360/GS010020/video_30s.mp4
+
+
+
+python3 visualize_map_gui.py \
+  --map data/ricoh/R0010003/my_saved_map.msg \
+  --fps 30 \
+  --tracks-json data/ricoh/R0010003/object_tracks.json \
+  --frame-traj data/ricoh/R0010003/frame_trajectory.txt \
+  --slam-frame-skip 1 \
+  --overlay-video output/ricoh/R0010003/object_detection.mp4
+
+
+# 
