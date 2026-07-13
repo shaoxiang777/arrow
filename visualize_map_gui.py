@@ -1,4 +1,5 @@
 import argparse
+from collections import OrderedDict
 import json
 import os
 import threading
@@ -141,6 +142,15 @@ def load_track_export(track_path):
     for sid_str, items in data.get("tracks", {}).items():
         sid = int(sid_str)
         tracks[sid] = sorted(items, key=lambda x: x["frame_idx"])
+    depth_backend = data.get("depth_backend")
+    requires_explicit_world_point = (
+        "stereo" in str(depth_backend or "").lower()
+        or any(
+            "stereo_valid" in item
+            for items in tracks.values()
+            for item in items
+        )
+    )
     return {
         "track_path": os.path.abspath(track_path),
         "video_path": data.get("video_path"),
@@ -148,6 +158,9 @@ def load_track_export(track_path):
         "fps": float(data.get("fps", 0.0)),
         "frame_width": int(data.get("frame_width", 0)),
         "frame_height": int(data.get("frame_height", 0)),
+        "depth_backend": depth_backend,
+        "coordinate_frame": data.get("coordinate_frame"),
+        "requires_explicit_world_point": requires_explicit_world_point,
         "slam_pose_frame_step": float(data.get("slam_pose_frame_step", 0.0)),
         "tracks": tracks,
     }
@@ -439,6 +452,7 @@ class MapGuiApp:
         track_radius=6.0,
         frame_traj_path=None,
         slam_frame_skip=None,
+        overlay_rgb_only=False,
     ):
         self.keyframes, self.lm_groups, self.lm_first_orders = load_map(msg_path)
         if not self.keyframes:
@@ -452,10 +466,35 @@ class MapGuiApp:
         self.pan_sensitivity = float(pan_sensitivity)
         self.track_radius = float(track_radius)
         self.overlay_video_info = load_video_metadata(overlay_video_path)
+        self.overlay_rgb_only = bool(overlay_rgb_only)
         self.overlay_video_cap = None
         self._overlay_last_frame_idx = None
+        self._overlay_capture_next_idx = None
+        self._overlay_frame_cache = OrderedDict()
+        self._overlay_frame_cache_limit = 48
         self.frame_poses = load_frame_trajectory(frame_traj_path)
         self.track_data = load_track_export(track_path)
+        self.overlay_display_aspect = None
+        if self.overlay_video_info is not None:
+            display_height = int(self.overlay_video_info["height"])
+            if self.overlay_rgb_only:
+                tracked_height = int((self.track_data or {}).get("frame_height", 0))
+                display_height = tracked_height if tracked_height > 0 else max(1, display_height // 2)
+            self.overlay_display_aspect = (
+                float(self.overlay_video_info["width"]) / max(display_height, 1)
+            )
+        trajectory_fps = self.fps
+        if self.overlay_video_info is not None and self.overlay_video_info.get("fps", 0.0) > 0.0:
+            trajectory_fps = float(self.overlay_video_info["fps"])
+        elif self.track_data is not None and self.track_data.get("fps", 0.0) > 0.0:
+            trajectory_fps = float(self.track_data["fps"])
+        if self.frame_poses:
+            first_pose_ts = float(self.frame_poses[0]["ts"])
+            self._pose_video_frames = np.rint(
+                [(float(pose["ts"]) - first_pose_ts) * trajectory_fps for pose in self.frame_poses]
+            ).astype(np.int64)
+        else:
+            self._pose_video_frames = np.empty(0, dtype=np.int64)
         self.track_plane_point, self.track_plane_normal = estimate_global_track_plane(self.keyframes)
         self.pose_frame_step = estimate_pose_frame_step(
             self.frame_poses,
@@ -484,12 +523,17 @@ class MapGuiApp:
         self.cur_index = 0
         self.playing = True
         self._slider_updating = False
+        self._slider_seek_timer = None
+        self._slider_seek_generation = 0
         self._closed = False
         self._animation_thread = None
         self._frame_update_pending = False
         self._last_middle_down = None
         self._middle_dragging = False
         self._drag_threshold = 4.0
+        self._last_b_preview_key = None
+        self._rendered_landmark_key = None
+        self._object_frustum_names = {}
         self._lookat = np.asarray(self.keyframes[0]["pos_w"], dtype=np.float64)
 
         self._landmark_prefix = []
@@ -512,7 +556,7 @@ class MapGuiApp:
         window_width = 1600
         window_height = 960
         if self.overlay_video_info is not None:
-            window_height += int(round((window_width * 0.5) / self.overlay_video_info["aspect"]))
+            window_height += int(round((window_width * 0.5) / self.overlay_display_aspect))
             self.overlay_video_cap = cv2.VideoCapture(self.overlay_video_info["path"])
 
         self.window = app.create_window("Map GUI Viewer", window_width, window_height)
@@ -524,8 +568,18 @@ class MapGuiApp:
         self.b_object_image = None
         self._b_object_preview_size = (360, 450)
         if self.overlay_video_info is not None:
+            placeholder_height = int(self.overlay_video_info["height"])
+            if self.overlay_rgb_only:
+                placeholder_height = int((self.track_data or {}).get("frame_height", 0)) or max(
+                    1, placeholder_height // 2
+                )
+            placeholder_width = min(int(self.overlay_video_info["width"]), 1280)
+            placeholder_height = max(
+                1,
+                int(round(placeholder_height * placeholder_width / self.overlay_video_info["width"])),
+            )
             placeholder = np.zeros(
-                (self.overlay_video_info["height"], self.overlay_video_info["width"], 3),
+                (placeholder_height, placeholder_width, 3),
                 dtype=np.uint8,
             )
             self.video_widget = gui.ImageWidget(o3d.geometry.Image(np.ascontiguousarray(placeholder)))
@@ -645,7 +699,7 @@ class MapGuiApp:
         video_height = 0
         if self.video_widget is not None and self.overlay_video_info is not None:
             video_width = int(round(r.width * 0.5))
-            video_height = int(round(video_width / self.overlay_video_info["aspect"]))
+            video_height = int(round(video_width / self.overlay_display_aspect))
             video_x = r.x + (r.width - video_width) // 2
             self.video_widget.frame = gui.Rect(video_x, r.y, video_width, video_height)
             if self.b_object_panel is not None:
@@ -674,6 +728,9 @@ class MapGuiApp:
         if self.overlay_video_cap is not None:
             self.overlay_video_cap.release()
             self.overlay_video_cap = None
+        if self._slider_seek_timer is not None:
+            self._slider_seek_timer.cancel()
+            self._slider_seek_timer = None
         return True
 
     def _setup_scene(self):
@@ -681,6 +738,32 @@ class MapGuiApp:
         coord_mat = rendering.MaterialRecord()
         coord_mat.shader = "defaultLit"
         self.scene_widget.scene.add_geometry("coord", coord, coord_mat)
+
+        frustum_mat = rendering.MaterialRecord()
+        frustum_mat.shader = "unlitLine"
+        frustum_mat.line_width = 4.0
+        ego_frustum = make_frustum(
+            np.zeros(3, dtype=np.float64),
+            np.eye(3, dtype=np.float64),
+            scale=self.frustum_scale,
+        )
+        self.scene_widget.scene.add_geometry("frustum", ego_frustum, frustum_mat)
+
+        if self.track_data is not None:
+            for sid in sorted(self.track_data["tracks"]):
+                name = f"obj_frustum_{sid}"
+                object_frustum = make_frustum(
+                    np.zeros(3, dtype=np.float64),
+                    np.eye(3, dtype=np.float64),
+                    scale=self.frustum_scale,
+                )
+                color = np.array([1.0, 0.45, 0.0], dtype=np.float64)
+                object_frustum.colors = o3d.utility.Vector3dVector(
+                    np.tile(color, (len(object_frustum.lines), 1))
+                )
+                self.scene_widget.scene.add_geometry(name, object_frustum, frustum_mat)
+                self.scene_widget.scene.show_geometry(name, False)
+                self._object_frustum_names[sid] = name
         self._reset_camera_to_scene_bounds()
 
     def _reset_camera_to_scene_bounds(self):
@@ -725,6 +808,7 @@ class MapGuiApp:
 
     def _on_ego_scale_changed(self, value):
         self._ego_scale = max(float(value), 1e-6)
+        self._rendered_landmark_key = None
         self._reset_camera_to_scene_bounds()
         self._apply_frame(self.cur_index, reset_camera=True)
 
@@ -746,6 +830,11 @@ class MapGuiApp:
         return self._scale_map_point(pose["pos_w"])
 
     def _scaled_object_world_point_for_item(self, item):
+        if "world_point" in item and item.get(
+            "world_point_method"
+        ) != "median_depth_backprojection_from_perspective":
+            return self._scale_map_point(item["world_point"])
+
         pose = self._frame_pose_for_video_frame(item["frame_idx"])
         scaled_origin = self._scaled_ego_position(pose)
 
@@ -760,6 +849,9 @@ class MapGuiApp:
                 offset_world = world_point - np.asarray(pose["pos_w"], dtype=np.float64)
                 return scaled_origin + offset_world
             return self._scale_map_point(world_point)
+
+        if self.track_data.get("requires_explicit_world_point", False):
+            return None
 
         frame_width = int(self.track_data.get("frame_width", 0))
         frame_height = int(self.track_data.get("frame_height", 0))
@@ -820,17 +912,38 @@ class MapGuiApp:
         if not items:
             return None
 
+        explicit_depth_tracks = self.track_data.get("requires_explicit_world_point", False)
+
+        if explicit_depth_tracks:
+            for item in items:
+                item_frame_idx = int(item["frame_idx"])
+                if item_frame_idx > int(current_video_frame_idx):
+                    break
+                if item_frame_idx != int(current_video_frame_idx):
+                    continue
+                if item.get("ghost", False) or item.get("measurement_rejected", False):
+                    return None
+                return self._track_world_point_for_item(item)
+            return None
+
         latest_item = None
+        latest_world = None
         for item in items:
             if int(item["frame_idx"]) > int(current_video_frame_idx):
                 break
             if item.get("ghost", False):
                 continue
+            if explicit_depth_tracks and item.get("measurement_rejected", False):
+                continue
+            world = self._track_world_point_for_item(item)
+            if world is None:
+                continue
             latest_item = item
+            latest_world = world
         if latest_item is None:
             return None
 
-        return self._track_world_point_for_item(latest_item)
+        return latest_world
 
     def _update_track_distance_labels(self, current_video_frame_idx, ego_pos_w):
         distance_map = self._current_track_distance_map(current_video_frame_idx, ego_pos_w)
@@ -875,16 +988,46 @@ class MapGuiApp:
 
         if distance is None:
             distance_text = "Distance to Ego: N/A"
+            distance_bucket = None
         else:
             distance_text = f"Distance to Ego: {distance:.2f} m"
+            distance_bucket = round(float(distance) * 20.0) / 20.0
+        preview_key = (
+            sid_b,
+            distance_bucket,
+            self._b_object_preview_size,
+        )
+        if preview_key == self._last_b_preview_key:
+            return
         preview = _make_b_object_preview_image(distance_text, image, *self._b_object_preview_size)
         self.b_object_image.update_image(o3d.geometry.Image(np.ascontiguousarray(preview)))
+        self._last_b_preview_key = preview_key
 
     def _on_slider_changed(self, value):
         if self._slider_updating:
             return
+        self.playing = False
+        self.play_btn.text = "Play"
         self.cur_index = int(value)
-        self._apply_frame(self.cur_index, reset_camera=False)
+        self._slider_seek_generation += 1
+        generation = self._slider_seek_generation
+        if self._slider_seek_timer is not None:
+            self._slider_seek_timer.cancel()
+
+        def request_latest_frame():
+            if self._closed or generation != self._slider_seek_generation:
+                return
+
+            def apply_latest_frame():
+                if self._closed or generation != self._slider_seek_generation:
+                    return
+                self._apply_frame(self.cur_index, reset_camera=False)
+
+            gui.Application.instance.post_to_main_thread(self.window, apply_latest_frame)
+
+        self._slider_seek_timer = threading.Timer(0.06, request_latest_frame)
+        self._slider_seek_timer.daemon = True
+        self._slider_seek_timer.start()
 
     def _start_animation(self):
         def worker():
@@ -933,13 +1076,39 @@ class MapGuiApp:
         if self._overlay_last_frame_idx == idx:
             return
 
-        if self._overlay_last_frame_idx is None or idx != self._overlay_last_frame_idx + 1:
+        cached = self._overlay_frame_cache.get(idx)
+        if cached is not None:
+            self._overlay_frame_cache.move_to_end(idx)
+            self.video_widget.update_image(o3d.geometry.Image(np.ascontiguousarray(cached)))
+            self._overlay_last_frame_idx = idx
+            return
+
+        if self._overlay_capture_next_idx != idx:
             self.overlay_video_cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
         ret, frame = self.overlay_video_cap.read()
         if not ret or frame is None:
             return
+        self._overlay_capture_next_idx = idx + 1
+
+        if self.overlay_rgb_only:
+            tracked_height = int((self.track_data or {}).get("frame_height", 0))
+            rgb_height = tracked_height if tracked_height > 0 else max(1, frame.shape[0] // 2)
+            frame = frame[:min(rgb_height, frame.shape[0])]
+
+        max_overlay_width = 1280
+        if frame.shape[1] > max_overlay_width:
+            scale = max_overlay_width / float(frame.shape[1])
+            frame = cv2.resize(
+                frame,
+                (max_overlay_width, max(1, int(round(frame.shape[0] * scale)))),
+                interpolation=cv2.INTER_AREA,
+            )
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        self._overlay_frame_cache[idx] = rgb
+        self._overlay_frame_cache.move_to_end(idx)
+        while len(self._overlay_frame_cache) > self._overlay_frame_cache_limit:
+            self._overlay_frame_cache.popitem(last=False)
         self.video_widget.update_image(o3d.geometry.Image(np.ascontiguousarray(rgb)))
         self._overlay_last_frame_idx = idx
 
@@ -978,14 +1147,21 @@ class MapGuiApp:
 
     def _frame_pose_for_video_frame(self, video_frame_idx):
         if self.frame_poses:
-            pose_index = float(video_frame_idx) / max(self.pose_frame_step, 1e-6)
-            pose_index = float(np.clip(pose_index, 0.0, len(self.frame_poses) - 1))
-            low = int(np.floor(pose_index))
-            high = int(np.ceil(pose_index))
+            high = int(np.searchsorted(self._pose_video_frames, video_frame_idx, side="left"))
+            if high <= 0:
+                return self.frame_poses[0]
+            if high >= len(self.frame_poses):
+                return self.frame_poses[-1]
+            if self._pose_video_frames[high] == video_frame_idx:
+                return self.frame_poses[high]
+
+            low = high - 1
             if low == high:
                 return self.frame_poses[low]
 
-            alpha = float(pose_index - low)
+            low_frame = int(self._pose_video_frames[low])
+            high_frame = int(self._pose_video_frames[high])
+            alpha = float(video_frame_idx - low_frame) / max(high_frame - low_frame, 1)
             pose_a = self.frame_poses[low]
             pose_b = self.frame_poses[high]
             pos_w = (1.0 - alpha) * pose_a["pos_w"] + alpha * pose_b["pos_w"]
@@ -1082,55 +1258,96 @@ class MapGuiApp:
         for sid, items in self.track_data["tracks"].items():
             if sid not in self.selected_track_ids:
                 continue
+            explicit_depth_tracks = self.track_data.get("requires_explicit_world_point", False)
             traj = []
             for item in items:
                 if int(item["frame_idx"]) > int(current_video_frame_idx):
                     break
                 if item.get("ghost", False):
                     continue
+                if explicit_depth_tracks and item.get("measurement_rejected", False):
+                    continue
                 world = self._track_world_point_for_item(item)
                 if world is None:
                     continue
-                traj.append(world)
+                traj.append((int(item["frame_idx"]), world))
 
             if len(traj) < 2:
                 continue
 
             color = _rgb_color_from_track_id(sid)
-            points.extend(traj)
+            points.extend(world for _, world in traj)
+            max_gap_frames = max(1, int(round(float(self.fps))))
             for i in range(len(traj) - 1):
-                lines.append([point_offset + i, point_offset + i + 1])
-                colors.append(color)
+                if not explicit_depth_tracks or traj[i + 1][0] - traj[i][0] <= max_gap_frames:
+                    lines.append([point_offset + i, point_offset + i + 1])
+                    colors.append(color)
             point_offset += len(traj)
 
         return build_colored_lineset(points, lines, colors)
 
-    def _build_object_frustum_lineset(self, current_video_frame_idx, rot_wc):
-        if self.track_data is None or not self.show_object_tracks:
-            return o3d.geometry.LineSet()
+    def _visual_track_world_point(self, current_video_frame_idx, sid):
+        world = self._current_track_world_point(current_video_frame_idx, sid)
+        if world is not None:
+            return world
+        if self.track_data is None or not self.track_data.get(
+            "requires_explicit_world_point",
+            False,
+        ):
+            return None
 
-        points = []
-        lines = []
-        colors = []
-        point_offset = 0
-        for sid in sorted(self.selected_track_ids):
-            world = self._current_track_world_point(current_video_frame_idx, sid)
-            if world is None:
+        items = self.track_data["tracks"].get(int(sid), [])
+        previous = None
+        following = None
+        for item in items:
+            frame_idx = int(item["frame_idx"])
+            if item.get("ghost", False) or item.get("measurement_rejected", False):
                 continue
-            frustum = make_frustum(
-                world,
-                rot_wc,
-                scale=self.frustum_scale * self._ego_scale,
-            )
-            frustum_points = np.asarray(frustum.points)
-            frustum_lines = np.asarray(frustum.lines)
-            color = _rgb_color_from_track_id(sid)
-            points.extend(frustum_points)
-            lines.extend((frustum_lines + point_offset).tolist())
-            colors.extend([color] * len(frustum_lines))
-            point_offset += len(frustum_points)
+            item_world = self._track_world_point_for_item(item)
+            if item_world is None:
+                continue
+            if frame_idx < int(current_video_frame_idx):
+                previous = (frame_idx, item_world)
+                continue
+            if frame_idx > int(current_video_frame_idx):
+                following = (frame_idx, item_world)
+                break
 
-        return build_colored_lineset(points, lines, colors)
+        if previous is None or following is None:
+            return None
+        max_gap_frames = max(1, int(round(0.5 * float(self.fps))))
+        frame_gap = following[0] - previous[0]
+        if frame_gap > max_gap_frames:
+            return None
+        alpha = float(current_video_frame_idx - previous[0]) / max(frame_gap, 1)
+        return (1.0 - alpha) * previous[1] + alpha * following[1]
+
+    def _frustum_transform(self, world, rot_wc, world_is_scaled=False):
+        transform = np.eye(4, dtype=np.float64)
+        transform[:3, :3] = float(self._ego_scale) * np.asarray(rot_wc, dtype=np.float64)
+        transform[:3, 3] = (
+            np.asarray(world, dtype=np.float64)
+            if world_is_scaled
+            else self._scale_map_point(world)
+        )
+        return transform
+
+    def _update_frustum_transforms(self, current_video_frame_idx, pose):
+        self.scene_widget.scene.set_geometry_transform(
+            "frustum",
+            self._frustum_transform(pose["pos_w"], pose["rot_wc"]),
+        )
+        for sid, name in self._object_frustum_names.items():
+            visible = self.show_object_tracks and sid in self.selected_track_ids
+            world = self._visual_track_world_point(current_video_frame_idx, sid) if visible else None
+            if world is None:
+                self.scene_widget.scene.show_geometry(name, False)
+                continue
+            self.scene_widget.scene.set_geometry_transform(
+                name,
+                self._frustum_transform(world, pose["rot_wc"], world_is_scaled=True),
+            )
+            self.scene_widget.scene.show_geometry(name, True)
 
     def _apply_frame(self, idx, reset_camera=False):
         idx = max(0, min(idx, self.total_frames - 1))
@@ -1144,27 +1361,26 @@ class MapGuiApp:
         kf = self.keyframes[keyframe_idx]
 
         if self.frame_poses:
-            pose_index = int(np.floor(float(idx) / max(self.pose_frame_step, 1e-6)))
+            pose_index = int(np.searchsorted(self._pose_video_frames, idx, side="right") - 1)
             pose_index = int(np.clip(pose_index, 0, len(self.frame_poses) - 1))
             traj_points = [self._scale_map_point(x["pos_w"]) for x in self.frame_poses[:pose_index + 1]]
         else:
             traj_points = [self._scale_map_point(x["pos_w"]) for x in self.keyframes[:keyframe_idx + 1]]
         lm_count = self._num_landmarks_until(keyframe_idx)
-        lm_points = (
-            self._scale_map_points(self._ordered_landmarks[:lm_count])
-            if lm_count > 0
-            else np.empty((0, 3), dtype=np.float64)
-        )
+        landmark_key = (keyframe_idx, lm_count, float(self._ego_scale), float(self.point_size))
+        update_landmarks = landmark_key != self._rendered_landmark_key
 
         traj = build_trajectory_line(traj_points)
-        pcd = build_point_cloud(lm_points)
-        frustum = make_frustum(
-            self._scale_map_point(pose["pos_w"]),
-            pose["rot_wc"],
-            scale=self.frustum_scale * self._ego_scale,
-        )
+        pcd = None
+        if update_landmarks:
+            lm_points = (
+                self._scale_map_points(self._ordered_landmarks[:lm_count])
+                if lm_count > 0
+                else np.empty((0, 3), dtype=np.float64)
+            )
+            pcd = build_point_cloud(lm_points)
         obj_tracks = self._build_track_lineset(idx)
-        obj_frustums = self._build_object_frustum_lineset(idx, pose["rot_wc"])
+        self._update_frustum_transforms(idx, pose)
 
         pcd_mat = rendering.MaterialRecord()
         pcd_mat.shader = "defaultUnlit"
@@ -1174,20 +1390,20 @@ class MapGuiApp:
         line_mat.shader = "unlitLine"
         line_mat.line_width = 4.0
 
-        for name in ("pcd", "traj", "frustum", "obj_tracks", "obj_frustums"):
+        for name in ("traj", "obj_tracks"):
             if self.scene_widget.scene.has_geometry(name):
                 self.scene_widget.scene.remove_geometry(name)
 
-        if has_point_cloud_points(pcd):
-            self.scene_widget.scene.add_geometry("pcd", pcd, pcd_mat)
+        if update_landmarks:
+            if self.scene_widget.scene.has_geometry("pcd"):
+                self.scene_widget.scene.remove_geometry("pcd")
+            if has_point_cloud_points(pcd):
+                self.scene_widget.scene.add_geometry("pcd", pcd, pcd_mat)
+            self._rendered_landmark_key = landmark_key
         if has_lineset_lines(traj):
             self.scene_widget.scene.add_geometry("traj", traj, line_mat)
-        if has_lineset_lines(frustum):
-            self.scene_widget.scene.add_geometry("frustum", frustum, line_mat)
         if has_lineset_lines(obj_tracks):
             self.scene_widget.scene.add_geometry("obj_tracks", obj_tracks, line_mat)
-        if has_lineset_lines(obj_frustums):
-            self.scene_widget.scene.add_geometry("obj_frustums", obj_frustums, line_mat)
 
         if reset_camera or self.follow_view:
             self._set_camera_from_pose(pose["pos_w"], pose["rot_wc"])
@@ -1199,7 +1415,7 @@ class MapGuiApp:
             f"Video Frame: {idx + 1}/{self.total_frames}\n"
             f"Timestamp: {pose['ts']:.3f}\n"
             f"Matched Keyframe: {keyframe_idx + 1}/{len(self.keyframes)} (ID {kf['id']})\n"
-            f"Visible landmarks: {len(lm_points)}\n"
+            f"Visible landmarks: {lm_count}\n"
             f"Object tracks: {0 if self.track_data is None else len(self.track_data['tracks'])}\n"
             f"Selected tracks: {len(self.selected_track_ids) if self.track_data is not None else 0}"
         )
@@ -1320,6 +1536,11 @@ def main():
     parser.add_argument("--pan-sensitivity", type=float, default=4.0, help="Mouse middle-drag pan sensitivity")
     parser.add_argument("--tracks-json", default=None, help="Optional track json path; defaults to sibling object_tracks.json")
     parser.add_argument("--overlay-video", default=None, help="Optional synced video shown above the 3D map")
+    parser.add_argument(
+        "--overlay-rgb-only",
+        action="store_true",
+        help="Show only the RGB row from a two-row RGB/depth overlay for faster playback.",
+    )
     parser.add_argument("--track-radius", type=float, default=6.0, help="Fallback radius used to project 2D tracks into 3D")
     parser.add_argument("--frame-traj", default=None, help="Optional frame trajectory txt path; defaults to sibling frame_trajectory.txt")
     parser.add_argument("--slam-frame-skip", type=float, default=None, help="Raw-video frame step used when exporting frame_trajectory.txt, e.g. 2 for --frame-skip 2")
@@ -1340,6 +1561,7 @@ def main():
         track_radius=args.track_radius,
         frame_traj_path=frame_traj_path,
         slam_frame_skip=args.slam_frame_skip,
+        overlay_rgb_only=args.overlay_rgb_only,
     )
     app.run()
 

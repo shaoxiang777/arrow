@@ -1,144 +1,420 @@
-# stella_vslam
+<p align="center">
+  <img src="media/arrow_logo.png" alt="Arrow logo" width="240">
+</p>
 
-[![CI](https://github.com/stella-cv/stella_vslam/actions/workflows/main.yml/badge.svg)](https://github.com/stella-cv/stella_vslam/actions/workflows/main.yml)
-[![Documentation Status](https://readthedocs.org/projects/stella-cv/badge/?version=latest)](https://stella-cv.readthedocs.io/en/latest/?badge=latest)
-[![License](https://img.shields.io/badge/License-BSD%202--Clause-orange.svg)](https://opensource.org/licenses/BSD-2-Clause)
+<h1 align="center">Arrow: 360° Panoramic Perception and Visual SLAM</h1>
 
----
+Arrow is a perception and visualization pipeline for 360° panoramic video. It combines:
 
-> *NOTE:* This is a community fork of [xdspacelab/openvslam](https://github.com/xdspacelab/openvslam). It was created to continue active development of OpenVSLAM on Jan 31, 2021. The original repository is no longer available. Please read the [official statement of termination](https://github.com/xdspacelab/openvslam/wiki/Termination-of-the-release) carefully and understand it before using this. The similarities with ORB_SLAM2 in the original version have been removed by [#252](https://github.com/stella-cv/stella_vslam/pull/252). If you find any other issues with the license, please point them out. See [#37](https://github.com/stella-cv/stella_vslam/issues/37) and [#249](https://github.com/stella-cv/stella_vslam/issues/249) for discussion so far.
+- panoramic visual SLAM with Stella VSLAM;
+- multi-view object detection and tracking with Ultralytics YOLO;
+- panoramic depth estimation with DAP (Depth Any Panoramas);
+- metric map-scale estimation using a calibrated stereo camera pair;
+- Open3D visualization of the SLAM map, camera trajectory, and object tracks.
 
-*Versions earlier than 0.3 are deprecated. If you use them, please use them as a derivative of ORB_SLAM2 under the GPL license.*
+## 🧰 Requirements
 
----
+- Linux (Ubuntu 22.04 recommended)
+- Conda with Python 3.10
+- FFmpeg
+- Docker
+- NVIDIA GPU, NVIDIA driver, and NVIDIA Container Toolkit
+- A desktop session with display access for the Stella VSLAM and Open3D viewers
 
-## Overview
+## 📦 Get the Code
 
-[<img src="https://raw.githubusercontent.com/stella-cv/docs/main/docs/img/teaser.png" width="640px">](https://arxiv.org/abs/1910.01122)
-
-<img src="https://j.gifs.com/81m1QL.gif" width="640px">
-
-[**[PrePrint]**](https://arxiv.org/abs/1910.01122)
-
-stella_vslam is a monocular, stereo, and RGBD visual SLAM system.
-
-### Features
-
-The notable features are:
-
-- It is compatible with **various type of camera models** and can be easily customized for other camera models.
-- Created maps can be **stored and loaded**, then stella_vslam can **localize new images** based on the prebuilt maps.
-- The system is fully modular. It is designed by encapsulating several functions in separated components with easy-to-understand APIs.
-- We provided **some code snippets** to understand the core functionalities of this system.
-
-One of the noteworthy features of stella_vslam is that the system can deal with various type of camera models, such as perspective, fisheye, and equirectangular.
-If needed, users can implement extra camera models (e.g. dual fisheye, catadioptric) with ease.
-For example, visual SLAM algorithm using **equirectangular camera models** (e.g. RICOH THETA series, insta360 series, etc) is shown above.
-
-We provided [documentation](https://stella-cv.readthedocs.io/) for installation and tutorial.
-The repository for the ROS wrapper is [stella_vslam_ros](https://github.com/stella-cv/stella_vslam_ros).
-
-### Acknowledgements
-
-OpenVSLAM is based on an indirect SLAM algorithm with sparse features, such as [ORB-SLAM](https://arxiv.org/abs/1502.00956)/[ORB-SLAM2](https://arxiv.org/abs/1610.06475), [ProSLAM](https://arxiv.org/abs/1709.04377), and [UcoSLAM](https://arxiv.org/abs/1902.03729).
-The core architecture is based on ORB-SLAM/ORB-SLAM2 and the code has been redesigned and written from scratch to improve scalability, readability, performance, etc.
-UcoSLAM has implemented the parallelization of feature extraction, map storage and loading earlier.
-ProSLAM has implemented a highly modular and easily understood system earlier.
-
-### Examples
-
-Some code snippets to understand the core functionalities of the system are provided.
-You can employ these snippets for in your own programs.
-Please see the `*.cc` files in `./example` directory or check [Simple Tutorial](https://stella-cv.readthedocs.io/en/latest/simple_tutorial.html) and [Example](https://stella-cv.readthedocs.io/en/latest/example.html).
-
-## Installation
-
-Please see [**Installation**](https://stella-cv.readthedocs.io/en/latest/installation.html) chapter in the [documentation](https://stella-cv.readthedocs.io/).
-
-[**The instructions for Docker users**](https://stella-cv.readthedocs.io/en/latest/docker.html) are also provided.
-
-## Tutorial
-
-Please see [**Simple Tutorial**](https://stella-cv.readthedocs.io/en/latest/simple_tutorial.html) chapter in the [documentation](https://stella-cv.readthedocs.io/).
-
-A sample ORB vocabulary file can be downloaded from [here](https://github.com/stella-cv/FBoW_orb_vocab/raw/main/orb_vocab.fbow).
-Sample datasets are also provided at [here](https://drive.google.com/open?id=1A_gq8LYuENePhNHsuscLZQPhbJJwzAq4).
-
-If you would like to run visual SLAM with standard benchmarking datasets (e.g. KITTI Odometry dataset), please see [**SLAM with standard datasets**](https://stella-cv.readthedocs.io/en/latest/example.html#slam-with-standard-datasets) section in the [documentation](https://stella-cv.readthedocs.io/).
-
-## Community
-
-Please contact us via [GitHub Discussions](https://github.com/stella-cv/stella_vslam/discussions) if you have any questions or notice any bugs about the software.
-
-## Currently working on
-
-- Refactoring
-- Algorithm changes and parameter additions to improve performance
-- Add tests
-- Marker integration
-- Implementation of extra camera models
-- Python bindings
-- IMU integration
-
-The higher up the list, the higher the priority.
-Feedbacks, feature requests, and contribution are welcome!
-
-## License
-
-**2-clause BSD license** (see [LICENSE](./LICENSE))
-
-The following files are derived from third-party libraries.
-
-- `./3rd/json` : [nlohmann/json \[v3.6.1\]](https://github.com/nlohmann/json) (MIT license)
-- `./3rd/spdlog` : [gabime/spdlog \[v1.3.1\]](https://github.com/gabime/spdlog) (MIT license)
-- `./3rd/tinycolormap` : [yuki-koyama/tinycolormap](https://github.com/yuki-koyama/tinycolormap) (MIT license)
-- `./3rd/FBoW` : [stella-cv/FBoW](https://github.com/stella-cv/FBoW) (MIT license) (forked from [rmsalinas/fbow](https://github.com/rmsalinas/fbow))
-- `./src/stella_vslam/solver/essential_5pt.h` : part of [libmv/libmv](https://github.com/libmv/libmv) (MIT license)
-- `./src/stella_vslam/solver/pnp_solver.cc` : part of [laurentkneip/opengv](https://github.com/laurentkneip/opengv) (3-clause BSD license)
-- `./src/stella_vslam/feature/orb_extractor.cc` : part of [opencv/opencv](https://github.com/opencv/opencv) (3-clause BSD License)
-- `./src/stella_vslam/feature/orb_point_pairs.h` : part of [opencv/opencv](https://github.com/opencv/opencv) (3-clause BSD License)
-
-Please use `g2o` as the dynamic link library because `csparse_extension` module of `g2o` is LGPLv3+.
-
-## Authors of the original version of OpenVSLAM
-
-- Shinya Sumikura ([@shinsumicco](https://github.com/shinsumicco))
-- Mikiya Shibuya ([@MikiyaShibuya](https://github.com/MikiyaShibuya))
-- Ken Sakurada ([@kensakurada](https://github.com/kensakurada))
-
-## Citation of original version of OpenVSLAM
-
-OpenVSLAM **won first place** at **ACM Multimedia 2019 Open Source Software Competition**.
-
-If OpenVSLAM helps your research, please cite the paper for OpenVSLAM. Here is a BibTeX entry:
-
-```
-@inproceedings{openvslam2019,
-  author = {Sumikura, Shinya and Shibuya, Mikiya and Sakurada, Ken},
-  title = {{OpenVSLAM: A Versatile Visual SLAM Framework}},
-  booktitle = {Proceedings of the 27th ACM International Conference on Multimedia},
-  series = {MM '19},
-  year = {2019},
-  isbn = {978-1-4503-6889-6},
-  location = {Nice, France},
-  pages = {2292--2295},
-  numpages = {4},
-  url = {http://doi.acm.org/10.1145/3343031.3350539},
-  doi = {10.1145/3343031.3350539},
-  acmid = {3350539},
-  publisher = {ACM},
-  address = {New York, NY, USA}
-}
+```bash
+git clone --recursive https://github.com/shaoxiang777/arrow.git
+cd arrow
 ```
 
-The preprint can be found [here](https://arxiv.org/abs/1910.01122).
+The `third_part/DAP` submodule uses a GitHub SSH URL. If the recursive clone fails, configure your GitHub SSH key and run:
 
-## Reference
+```bash
+git submodule update --init --recursive
+```
 
-- Raúl Mur-Artal, J. M. M. Montiel, and Juan D. Tardós. 2015. ORB-SLAM: a Versatile and Accurate Monocular SLAM System. IEEE Transactions on Robotics 31, 5 (2015), 1147–1163.
-- Raúl Mur-Artal and Juan D. Tardós. 2017. ORB-SLAM2: an Open-Source SLAM System for Monocular, Stereo and RGB-D Cameras. IEEE Transactions on Robotics 33, 5 (2017), 1255–1262.
-- Dominik Schlegel, Mirco Colosi, and Giorgio Grisetti. 2018. ProSLAM: Graph SLAM from a Programmer’s Perspective. In Proceedings of IEEE International Conference on Robotics and Automation (ICRA). 1–9.
-- Rafael Muñoz-Salinas and Rafael Medina Carnicer. 2019. UcoSLAM: Simultaneous Localization and Mapping by Fusion of KeyPoints and Squared Planar Markers. arXiv:1902.03729.
-- Mapillary AB. 2019. OpenSfM. <https://github.com/mapillary/OpenSfM>.
-- Giorgio Grisetti, Rainer Kümmerle, Cyrill Stachniss, and Wolfram Burgard. 2010. A Tutorial on Graph-Based SLAM. IEEE Transactions on Intelligent Transportation SystemsMagazine 2, 4 (2010), 31–43.
-- Rainer Kümmerle, Giorgio Grisetti, Hauke Strasdat, Kurt Konolige, and Wolfram Burgard. 2011. g2o: A general framework for graph optimization. In Proceedings of IEEE International Conference on Robotics and Automation (ICRA). 3607–3613.
+## 🐍 Create the Conda Environment
+
+Create an environment named `arrow`:
+
+```bash
+conda create -n arrow python=3.10 -y
+conda activate arrow
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+The root `requirements.txt` is based on the local `arrow` environment and currently uses PyTorch 2.5.1 and torchvision 0.20.1.
+
+### Install DAP dependencies
+
+DAP has an additional requirements file:
+
+```bash
+pip install -r third_part/DAP/requirements.txt
+```
+
+DAP may install a different PyTorch stack. Verify that PyTorch can access the GPU after installation:
+
+```bash
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+```
+
+Download the pretrained DAP model described in the [DAP README](third_part/DAP/README.md), then place it at:
+
+```text
+third_part/DAP/weights/model.pth
+```
+
+## 🐳 Build the Stella VSLAM Docker Image
+
+From the repository root, run:
+
+```bash
+docker build \
+  -t stella_vslam-desktop \
+  -f Dockerfile.desktop \
+  --build-arg NUM_THREADS="$(nproc)" \
+  .
+```
+
+Allow the container to access the host display server:
+
+```bash
+xhost +SI:localuser:root
+```
+
+## 📐 Camera Calibration
+
+`run_cali_opencv.sh` calibrates a synchronized pair of 360° cameras with an OpenCV checkerboard workflow. The process finds the temporal offset, extracts synchronized equirectangular frames, converts them to perspective views, and estimates the stereo calibration.
+
+### 1. Prepare the checkerboard and videos
+
+Print [`stereo_calibration/calib.io_checker_297x210_7x10_25.pdf`](stereo_calibration/calib.io_checker_297x210_7x10_25.pdf) on A4 paper without automatic page scaling. Attach it to a flat, rigid surface and measure the printed square size with a ruler.
+
+Place the two calibration videos at:
+
+```text
+data/ricoh/cali_opencv/
+├── cam_1/video.MP4
+└── cam_2/video.MP4
+```
+
+Activate the project environment:
+
+```bash
+conda activate arrow
+```
+
+Open `run_cali_opencv.sh` and update the parameters for your recordings:
+
+```bash
+CAM0_VIDEO="data/ricoh/cali_opencv/cam_1/video.MP4"
+CAM1_VIDEO="data/ricoh/cali_opencv/cam_2/video.MP4"
+
+CAM0_START_FRAME=557
+CAM1_START_FRAME=554
+TIMESTAMP_FPS=30
+PAIR_FRAME_STEP=3
+PAIRS=300
+NUM_PAIRS=50
+
+CHECKERBOARD_ROWS=9
+CHECKERBOARD_COLS=6
+CHECKERBOARD_SQUARE_SIZE=0.024
+```
+
+- `CAM0_START_FRAME` and `CAM1_START_FRAME`: matching start frames in the two videos.
+- `TIMESTAMP_FPS`: actual recording frame rate.
+- `PAIR_FRAME_STEP`: interval between sampled frame pairs.
+- `PAIRS`: maximum number of synchronized frame pairs to generate.
+- `NUM_PAIRS`: number of uniformly selected pairs used for calibration.
+- `CHECKERBOARD_ROWS` and `CHECKERBOARD_COLS`: OpenCV checkerboard inner-corner dimensions.
+- `CHECKERBOARD_SQUARE_SIZE`: measured checkerboard square size in meters.
+
+### 2. Find the synchronization offset
+
+Set:
+
+```bash
+RUN_EXTRACT_sync=1
+RUN_EXTRACT_360=0
+```
+
+Run:
+
+```bash
+bash run_cali_opencv.sh
+```
+
+The script decodes both videos into `cam_1/frames` and `cam_2/frames` under `SYNC_ROOT`. Compare the images and identify frame numbers that represent the same moment.
+
+<table>
+  <tr>
+    <th align="center">cam_1 · frame 000127</th>
+    <th align="center">cam_2 · frame 000124</th>
+  </tr>
+  <tr>
+    <td><img src="media/cam_1_frame_000127.jpg" alt="Camera 1 frame 000127" width="100%"></td>
+    <td><img src="media/cam_2_frame_000124.jpg" alt="Camera 2 frame 000124" width="100%"></td>
+  </tr>
+</table>
+
+These images show the same moment at frame `127` in `cam_1` and frame `124` in `cam_2`, revealing a fixed offset of three frames.
+
+The final start frames used by this project are:
+
+```bash
+CAM0_START_FRAME=557
+CAM1_START_FRAME=554
+```
+
+Because `557 - 554 = 3`, the selected start frames preserve the same three-frame offset. Recalculate this offset when using different recordings.
+
+### 3. Generate synchronized equirectangular pairs
+
+Set:
+
+```bash
+RUN_EXTRACT_sync=0
+RUN_EXTRACT_360=1
+```
+
+Run the script again:
+
+```bash
+bash run_cali_opencv.sh
+```
+
+The synchronized frame pairs are written to:
+
+```text
+data/ricoh/cali_opencv/sync/paired_<cam0_start>_<cam1_start>/
+├── cam0/
+├── cam1/
+└── pairs.csv
+```
+
+Check that images with matching filenames show the same moment and that the checkerboard is sharp and visible in both cameras.
+
+### 4. Run the OpenCV stereo calibration
+
+Set:
+
+```bash
+RUN_EXTRACT_sync=0
+RUN_EXTRACT_360=0
+```
+
+Run:
+
+```bash
+bash run_cali_opencv.sh
+```
+
+The script selects `NUM_PAIRS` synchronized pairs, converts them to perspective views, detects the checkerboard, and performs stereo calibration. The default output is:
+
+```text
+data/ricoh/cali_opencv/virtual_sync_perspective/
+├── cam0/
+├── cam1/
+├── checkerboard_camchain.yaml
+└── visualization/
+```
+
+`checkerboard_camchain.yaml` contains the perspective-camera intrinsics, distortion parameters, inter-camera transformation, reprojection errors, and stereo baseline. Inspect `visualization/` for incorrect checkerboard detections or reprojections.
+
+The script prints a result similar to:
+
+```text
+baseline: 0.263175 m (26.32 cm)
+```
+
+Compare this value with the physically measured distance between the two camera centers.
+
+## 📁 Scene Data Layout
+
+Each scene used by the complete pipeline requires:
+
+```text
+data/arrow360/<scene>/
+├── config.yaml
+├── video_right_crop.mp4
+└── video_left_crop.MP4
+```
+
+- `video_right_crop.mp4` is the equirectangular video processed by Stella VSLAM.
+- `video_left_crop.MP4` is the synchronized video from the other calibrated camera and is used to estimate the metric map scale.
+- `config.yaml` is the Stella VSLAM camera configuration.
+
+The stereo calibration must be available at:
+
+```text
+data/ricoh/cali_opencv/virtual_sync_perspective/checkerboard_camchain.yaml
+```
+
+## ⚡ Fast Run
+
+After installing the dependencies, building the Docker image, calibrating the stereo cameras, and preparing the scene data, run the complete pipeline with:
+
+```bash
+conda activate arrow
+bash run_slam.sh demo
+```
+
+Replace `demo` with another scene directory name when needed. The script automatically downloads the ORB vocabulary if it is missing and reuses completed outputs when possible.
+
+The complete pipeline is:
+
+```text
+Stella VSLAM
+    ↓
+my_saved_map.msg + frame_trajectory.txt
+    ↓
+estimate_stereo_map_scale.py
+    ↓
+my_saved_map_metric.msg + frame_trajectory_metric.txt
+    ↓
+DAP depth inference + object detection and tracking
+```
+
+The main generated files are:
+
+```text
+data/arrow360/<scene>/
+├── frame_trajectory.txt
+├── my_saved_map.msg
+├── frame_trajectory_metric.txt
+├── my_saved_map_metric.msg
+├── stereo_map_scale_keyframes.csv
+├── stereo_map_scale.yaml
+├── stereo_map_scale_visualization/
+└── object_tracks.json
+
+output/arrow360/<scene>/
+└── video_right_crop_object_detection.mp4
+```
+
+`run_slam.sh` expects Conda to be initialized from `~/miniconda3/etc/profile.d/conda.sh`. Update that line if Conda is installed elsewhere.
+
+## 🧭 Manual Pipeline
+
+Use this section when you want to run or debug each stage separately.
+
+### 1. Run Stella VSLAM
+
+Download the ORB vocabulary if it is not already present:
+
+```bash
+curl -fL \
+  https://github.com/stella-cv/FBoW_orb_vocab/raw/main/orb_vocab.fbow \
+  -o orb_vocab.fbow
+```
+
+Run Stella VSLAM for the `demo` scene:
+
+```bash
+docker run --rm --privileged \
+  -e DISPLAY="$DISPLAY" \
+  -v /tmp/.X11-unix:/tmp/.X11-unix:ro \
+  -v "$PWD:/work" \
+  --gpus all \
+  stella_vslam-desktop \
+  -lc 'cd /stella_vslam_examples/build && ./run_video_slam \
+    -v /work/orb_vocab.fbow \
+    -c /work/data/arrow360/demo/config.yaml \
+    -m /work/data/arrow360/demo/video_right_crop.mp4 \
+    --frame-skip 2 \
+    --no-sleep \
+    --eval-log-dir /work/data/arrow360/demo/ \
+    --map-db-out /work/data/arrow360/demo/my_saved_map.msg'
+```
+
+This stage generates `my_saved_map.msg` and `frame_trajectory.txt`.
+
+### 2. Estimate the metric map scale
+
+```bash
+python tools/estimate_stereo_map_scale.py demo \
+  --slam-video data/arrow360/demo/video_right_crop.mp4 \
+  --slam-camera cam1 \
+  --calibration data/ricoh/cali_opencv/virtual_sync_perspective/checkerboard_camchain.yaml \
+  --other-video data/arrow360/demo/video_left_crop.MP4
+```
+
+This stage generates `my_saved_map_metric.msg`, `frame_trajectory_metric.txt`, and scale diagnostics.
+
+### 3. Run DAP depth inference and object tracking
+
+```bash
+conda activate arrow
+
+python tools/equirec2perspec_video.py \
+  --video data/arrow360/demo/video_right_crop.mp4 \
+  --output output/arrow360/demo \
+  --track-output data/arrow360/demo/object_tracks.json \
+  --map-path data/arrow360/demo/my_saved_map_metric.msg \
+  --frame-traj-path data/arrow360/demo/frame_trajectory_metric.txt \
+  --slam-frame-skip 2 \
+  --depth-model dap \
+  --frame_skip 10 \
+  --adaptive-dap \
+  --kalman_filter \
+  --track-max-speed 3.0 \
+  --max_depth 100
+```
+
+### 4. Visualize the metric map and object tracks
+
+```bash
+python visualize_map_gui.py \
+  --map data/arrow360/demo/my_saved_map_metric.msg \
+  --fps 30 \
+  --tracks-json data/arrow360/demo/object_tracks.json \
+  --frame-traj data/arrow360/demo/frame_trajectory_metric.txt \
+  --slam-frame-skip 2 \
+  --overlay-video output/arrow360/demo/video_right_crop_object_detection.mp4
+```
+
+## 🛠️ Troubleshooting
+
+### A submodule cannot be downloaded
+
+Confirm that your GitHub SSH key works, then initialize the submodules again:
+
+```bash
+ssh -T git@github.com
+git submodule update --init --recursive
+```
+
+### Docker cannot access the GPU
+
+Install NVIDIA Container Toolkit and verify GPU access:
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.9.0-base-ubuntu22.04 nvidia-smi
+```
+
+### The GUI cannot open
+
+Allow local root access to the display server and verify `DISPLAY`:
+
+```bash
+xhost +SI:localuser:root
+echo "$DISPLAY"
+```
+
+### Metric scale estimation reports a missing file
+
+Confirm that the scene contains both stereo videos and that calibration completed successfully:
+
+```bash
+ls data/arrow360/demo/video_right_crop.mp4
+ls data/arrow360/demo/video_left_crop.MP4
+ls data/ricoh/cali_opencv/virtual_sync_perspective/checkerboard_camchain.yaml
+```
+
+## 🙏 Acknowledgements and License
+
+Arrow builds on [Stella VSLAM](https://github.com/stella-cv/stella_vslam), DAP, Ultralytics YOLO, Open3D, and other open-source projects. See [LICENSE](LICENSE) and the license files in each submodule for details.

@@ -1,0 +1,16 @@
+# Core Python dependencies, based on the local `arrow` Conda environment.
+numpy==2.2.6
+scipy==1.15.3
+opencv-python==4.11.0.86
+matplotlib==3.10.8
+msgpack==1.1.2
+open3d==0.19.0
+PyYAML==6.0.3
+tqdm==4.68.3
+torch==2.5.1
+torchvision==0.20.1
+ultralytics==8.3.253
+ffmpeg-python==0.2.0
+
+# DAP is optional and has its own PyTorch stack:
+# pip install -r third_part/DAP/requirements.txt
