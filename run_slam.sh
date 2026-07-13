@@ -13,24 +13,24 @@ log_step() {
 #   --video-path data/arrow360/${SCENE}/video.mp4 \
 #   --start-time 00:17 \
 #   --end-time 01:30 \
-#   --output-path data/arrow360/${SCENE}/video_crop.mp4
+#   --output-path data/arrow360/${SCENE}/video_right_crop.mp4
 
 
 
-log_step "[1/2] Running Stella VSLAM for scene: ${SCENE}"
+log_step "[1/3] Running Stella VSLAM for scene: ${SCENE}"
 if [[ -f "data/arrow360/${SCENE}/my_saved_map.msg" && -f "data/arrow360/${SCENE}/frame_trajectory.txt" ]]; then
-  log_step "[1/2] Reusing existing SLAM map and trajectory for scene: ${SCENE}"
+  log_step "[1/3] Reusing existing SLAM map and trajectory for scene: ${SCENE}"
 else
   docker run --rm --privileged \
       -e DISPLAY=$DISPLAY \
       -v /tmp/.X11-unix/:/tmp/.X11-unix:ro \
-      -v ~/Documents/project/arrow:/work \
+      -v "$PWD:/work" \
       --gpus all \
       stella_vslam-desktop \
       -lc "cd /stella_vslam_examples/build && ./run_video_slam \
         -v /work/orb_vocab.fbow \
         -c /work/data/arrow360/${SCENE}/config.yaml \
-        -m /work/data/arrow360/${SCENE}/video_crop.mp4 \
+        -m /work/data/arrow360/${SCENE}/video_right_crop.mp4 \
         --frame-skip 2 \
         --no-sleep \
         --eval-log-dir /work/data/arrow360/${SCENE}/ \
@@ -46,6 +46,15 @@ if [[ ! -f "data/arrow360/${SCENE}/frame_trajectory.txt" ]]; then
   exit 1
 fi
 
+if [[ ! -f "data/arrow360/${SCENE}/my_saved_map_metric.msg" || \
+      ! -f "data/arrow360/${SCENE}/frame_trajectory_metric.txt" ]]; then
+  log_step "[2/3] Estimating metric SLAM map scale"
+
+  python tools/estimate_stereo_map_scale.py "${SCENE}" \
+    --slam-camera cam1 \
+    --other-video "data/arrow360/${SCENE}/video_left_crop.MP4"
+fi
+
 MAP_PATH="data/arrow360/${SCENE}/my_saved_map.msg"
 TRAJ_PATH="data/arrow360/${SCENE}/frame_trajectory.txt"
 if [[ -f "data/arrow360/${SCENE}/my_saved_map_metric.msg" && -f "data/arrow360/${SCENE}/frame_trajectory_metric.txt" ]]; then
@@ -56,16 +65,17 @@ fi
 
 
 # 运行DAP进行深度推理
-log_step "[2/2] Running DAP/object detection for arrow360/${SCENE}"
+log_step "[3/3] Running DAP/object detection for arrow360/${SCENE}"
 source ~/miniconda3/etc/profile.d/conda.sh
-conda activate dap
 
 # 进行四个视角的object detection
-if [[ -f "output/arrow360/${SCENE}/video_crop_object_detection.mp4" ]] && [[ $(stat -c%s "output/arrow360/${SCENE}/video_crop_object_detection.mp4") -lt 1024 ]]; then
-  rm "output/arrow360/${SCENE}/video_crop_object_detection.mp4"
+if [[ -f "output/arrow360/${SCENE}/video_right_crop_object_detection.mp4" ]] && [[ $(stat -c%s "output/arrow360/${SCENE}/video_right_crop_object_detection.mp4") -lt 1024 ]]; then
+  rm "output/arrow360/${SCENE}/video_right_crop_object_detection.mp4"
 fi
+
+
 python tools/equirec2perspec_video.py \
-  --video data/arrow360/${SCENE}/video_crop.mp4 \
+  --video data/arrow360/${SCENE}/video_right_crop.mp4 \
   --output output/arrow360/${SCENE} \
   --track-output data/arrow360/${SCENE}/object_tracks.json \
   --map-path "${MAP_PATH}" \
@@ -86,4 +96,4 @@ python tools/equirec2perspec_video.py \
 #   --fps 30 \
 #   --frame-traj data/arrow360/jia/frame_trajectory_metric.txt \
 #   --slam-frame-skip 2 \
-#   --overlay-video output/arrow360/jia/video_crop_object_detection.mp4
+#   --overlay-video output/arrow360/jia/video_right_crop_object_detection.mp4
