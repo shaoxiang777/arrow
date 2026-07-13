@@ -9,6 +9,13 @@ log_step() {
   printf "${GREEN}%s${RESET}\n" "$1"
 }
 
+if [[ ! -s "orb_vocab.fbow" ]]; then
+  log_step "[SETUP] Downloading ORB vocabulary"
+  curl -fL "https://github.com/stella-cv/FBoW_orb_vocab/raw/main/orb_vocab.fbow" \
+    -o "orb_vocab.fbow.tmp"
+  mv "orb_vocab.fbow.tmp" "orb_vocab.fbow"
+fi
+
 # python3 tools/crop_video.py \
 #   --video-path data/arrow360/${SCENE}/video.mp4 \
 #   --start-time 00:17 \
