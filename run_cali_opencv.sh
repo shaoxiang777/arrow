@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # ===== Parameters =====
-CAM0_VIDEO="data/ricoh/cali_opencv/cam_1/5.7_30.MP4"
-CAM1_VIDEO="data/ricoh/cali_opencv/cam_2/5.7_30.MP4"
-SYNC_ROOT="data/ricoh/cali_opencv/sync_5.7k"
+CAM0_VIDEO="data/ricoh/cali_opencv/cam_1/video.MP4"
+CAM1_VIDEO="data/ricoh/cali_opencv/cam_2/video.MP4"
+SYNC_ROOT="data/ricoh/cali_opencv/sync"
 
 CAM0_START_FRAME=557
 CAM1_START_FRAME=554
@@ -29,7 +29,7 @@ SHOW_EXTRACTION=1
 
 # ===== Derived paths =====
 PAIR_DIR="${SYNC_ROOT}/paired_${CAM0_START_FRAME}_${CAM1_START_FRAME}"
-OUTPUT_DIR="data/ricoh/cali_opencv/kalibr_virtual_sync_${CAM0_START_FRAME}_${CAM1_START_FRAME}_fov${FOV}"
+OUTPUT_DIR="data/ricoh/cali_opencv/virtual_sync_${CAM0_START_FRAME}_${CAM1_START_FRAME}"
 OPENCV_OUTPUT="${OUTPUT_DIR}/checkerboard_camchain.yaml"
 VISUALIZATION_DIR="${OUTPUT_DIR}/visualization"
 BAG_PATH="${OUTPUT_DIR}.bag"
