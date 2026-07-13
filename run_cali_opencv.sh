@@ -29,10 +29,9 @@ SHOW_EXTRACTION=1
 
 # ===== Derived paths =====
 PAIR_DIR="${SYNC_ROOT}/paired_${CAM0_START_FRAME}_${CAM1_START_FRAME}"
-OUTPUT_DIR="data/ricoh/cali_opencv/virtual_sync_${CAM0_START_FRAME}_${CAM1_START_FRAME}"
+OUTPUT_DIR="data/ricoh/cali_opencv/virtual_sync_perspective"
 OPENCV_OUTPUT="${OUTPUT_DIR}/checkerboard_camchain.yaml"
 VISUALIZATION_DIR="${OUTPUT_DIR}/visualization"
-BAG_PATH="${OUTPUT_DIR}.bag"
 
 # ==== Run the extraction of frames， 这个过程很粗糙，是直接解码的 =====
 # ==== 目的是找到合适的开始，以及结束时候的帧对 =====
