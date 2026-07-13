@@ -58,7 +58,9 @@ if [[ ! -f "data/arrow360/${SCENE}/my_saved_map_metric.msg" || \
   log_step "[2/3] Estimating metric SLAM map scale"
 
   python tools/estimate_stereo_map_scale.py "${SCENE}" \
+    --slam-video "data/arrow360/${SCENE}/video_right_crop.mp4" \
     --slam-camera cam1 \
+    --calibration "data/ricoh/cali_opencv/virtual_sync_perspective/checkerboard_camchain.yaml" \
     --other-video "data/arrow360/${SCENE}/video_left_crop.MP4"
 fi
 
