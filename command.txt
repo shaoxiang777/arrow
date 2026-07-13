@@ -266,5 +266,14 @@ python3 visualize_map_gui.py \
   --slam-frame-skip 1 \
   --overlay-video output/ricoh/R0010003/object_detection.mp4
 
+# 估计一个真实的scale
+python tools/estimate_stereo_map_scale.py jia \
+  --slam-camera cam1 \
+  --other-video data/arrow360/jia/video_left_crop.MP4
 
-# 
+# python3 visualize_map_gui.py \
+#   --map data/arrow360/jia/my_saved_map_metric.msg \
+#   --fps 30 \
+#   --frame-traj data/arrow360/jia/frame_trajectory_metric.txt \
+#   --slam-frame-skip 2 \
+#   --overlay-video output/arrow360/jia/video_crop_object_detection.mp4
