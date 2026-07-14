@@ -233,6 +233,35 @@ baseline: 0.263175 m (26.32 cm)
 
 Compare this value with the physically measured distance between the two camera centers.
 
+
+
+## ⚡ Fast Run
+
+### Download the demo dataset
+
+Download the dataset from the [Team ARROW SharePoint folder](https://dfkide.sharepoint.com/:f:/s/Team_ARROW/IgBujlECowASR78_I0sZ5RGqASkz7HDefUBEumvwgD9k8N0?e=YCNdk1).
+
+Extract or copy the downloaded `data` directory into the repository root. The downloaded dataset has the following layout:
+
+```text
+data/
+├── arrow360/
+│   └── demo/
+│       ├── config.yaml
+│       ├── video_left_crop.MP4
+│       └── video_right_crop.mp4
+└── ricoh/
+    └── cali_opencv/
+        ├── cam_0/
+        │   └── video.MP4
+        └── cam_1/
+            └── video.MP4
+```
+
+Make sure the result is `<repository>/data/arrow360/demo/`, not `<repository>/data/data/arrow360/demo/`.
+
+The calibration output `virtual_sync_perspective/checkerboard_camchain.yaml` is generated later by `run_cali_opencv.sh`; it is not included in the downloaded dataset.
+
 ## 📁 Scene Data Layout
 
 Each scene used by the complete pipeline requires:
@@ -248,13 +277,42 @@ data/arrow360/<scene>/
 - `video_left_crop.MP4` is the synchronized video from the other calibrated camera and is used to estimate the metric map scale.
 - `config.yaml` is the Stella VSLAM camera configuration.
 
+### Understanding `mask_rectangles` in `config.yaml`
+
+`mask_rectangles` prevents Stella VSLAM from extracting ORB features in image regions that are unreliable or irrelevant, such as the camera rig, the operator, a vehicle body, or a stitching seam. It does not crop or modify the video.
+
+Each rectangle uses normalized image coordinates in the following order:
+
+```text
+[x_min, x_max, y_min, y_max]
+```
+
+The coordinate origin is the top-left corner. Both axes use the range `0.0` to `1.0`, where `x` is measured across the image width and `y` across the image height.
+
+For example:
+
+```yaml
+mask_rectangles:
+  - [0.0, 0.25, 0.0, 1.0]
+  - [0.9, 1.0, 0.0, 1.0]
+  - [0.0, 1.0, 0.8, 1.0]
+```
+
+These rectangles mask:
+
+- the leftmost 25% of the image over its full height;
+- the rightmost 10% of the image over its full height;
+- the bottom 20% of the image over its full width.
+
+For a `5760 × 2880` video, these correspond approximately to `x=0–1440`, `x=5184–5760`, and `y=2304–2880`. Adjust the rectangles for each camera setup. Masking too much of the image reduces the number of usable features and can make SLAM initialization or tracking unstable.
+
 The stereo calibration must be available at:
 
 ```text
 data/ricoh/cali_opencv/virtual_sync_perspective/checkerboard_camchain.yaml
 ```
 
-## ⚡ Fast Run
+### Run the complete pipeline
 
 After installing the dependencies, building the Docker image, calibrating the stereo cameras, and preparing the scene data, run the complete pipeline with:
 
@@ -296,7 +354,22 @@ output/arrow360/<scene>/
 └── video_right_crop_object_detection.mp4
 ```
 
-`run_slam.sh` expects Conda to be initialized from `~/miniconda3/etc/profile.d/conda.sh`. Update that line if Conda is installed elsewhere.
+Visualize the metric map and object tracks
+
+```bash
+python visualize_map_gui.py \
+  --map data/arrow360/demo/my_saved_map_metric.msg \
+  --fps 30 \
+  --tracks-json data/arrow360/demo/object_tracks.json \
+  --frame-traj data/arrow360/demo/frame_trajectory_metric.txt \
+  --slam-frame-skip 2 \
+  --overlay-video output/arrow360/demo/video_right_crop_object_detection.mp4
+```
+
+<p align="center">
+  <img src="media/demo_gui.png" alt="Metric map and object track visualization" width="900">
+</p>
+
 
 ## 🧭 Manual Pipeline
 
@@ -365,55 +438,7 @@ python tools/equirec2perspec_video.py \
   --max_depth 100
 ```
 
-### 4. Visualize the metric map and object tracks
 
-```bash
-python visualize_map_gui.py \
-  --map data/arrow360/demo/my_saved_map_metric.msg \
-  --fps 30 \
-  --tracks-json data/arrow360/demo/object_tracks.json \
-  --frame-traj data/arrow360/demo/frame_trajectory_metric.txt \
-  --slam-frame-skip 2 \
-  --overlay-video output/arrow360/demo/video_right_crop_object_detection.mp4
-```
-
-## 🛠️ Troubleshooting
-
-### A submodule cannot be downloaded
-
-Confirm that your GitHub SSH key works, then initialize the submodules again:
-
-```bash
-ssh -T git@github.com
-git submodule update --init --recursive
-```
-
-### Docker cannot access the GPU
-
-Install NVIDIA Container Toolkit and verify GPU access:
-
-```bash
-docker run --rm --gpus all nvidia/cuda:12.9.0-base-ubuntu22.04 nvidia-smi
-```
-
-### The GUI cannot open
-
-Allow local root access to the display server and verify `DISPLAY`:
-
-```bash
-xhost +SI:localuser:root
-echo "$DISPLAY"
-```
-
-### Metric scale estimation reports a missing file
-
-Confirm that the scene contains both stereo videos and that calibration completed successfully:
-
-```bash
-ls data/arrow360/demo/video_right_crop.mp4
-ls data/arrow360/demo/video_left_crop.MP4
-ls data/ricoh/cali_opencv/virtual_sync_perspective/checkerboard_camchain.yaml
-```
 
 ## 🙏 Acknowledgements and License
 
