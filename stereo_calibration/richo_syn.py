@@ -82,6 +82,15 @@ def extract_video_frames(video_path, output_dir, every, max_frames, jpeg_quality
     rows = []
     written = 0
     frame_idx = 0
+    total = (info["frames"] + every - 1) // every
+    if max_frames is not None:
+        total = min(total, max_frames)
+    progress = tqdm(
+        total=total,
+        desc=f"Extracting {output_dir.name}",
+        unit="frame",
+        dynamic_ncols=True,
+    )
     encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)]
     try:
         while True:
@@ -102,10 +111,12 @@ def extract_video_frames(video_path, output_dir, every, max_frames, jpeg_quality
 
             rows.append([frame_idx, f"{t_s:.6f}", str(full_path.relative_to(output_dir))])
             written += 1
-            print(f"{output_dir.name}: wrote frame {frame_idx} ({written})")
+            progress.set_postfix(source_frame=frame_idx, refresh=False)
+            progress.update(1)
             frame_idx += 1
     finally:
         cap.release()
+        progress.close()
 
     with open(output_dir / "frames.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)

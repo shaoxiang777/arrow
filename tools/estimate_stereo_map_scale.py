@@ -122,6 +122,36 @@ def robust_values(values, minimum_count):
     return values[np.abs(values - median) <= threshold]
 
 
+def robust_value_mask(values, minimum_count):
+    values = np.asarray(values, dtype=np.float64)
+    if len(values) < minimum_count:
+        return np.zeros(len(values), dtype=bool)
+    median = float(np.median(values))
+    mad = float(np.median(np.abs(values - median)))
+    threshold = max(3.0 * 1.4826 * mad, 0.10 * median)
+    return np.abs(values - median) <= threshold
+
+
+def weighted_quantiles(values, weights, quantiles):
+    values = np.asarray(values, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    quantiles = np.asarray(quantiles, dtype=np.float64)
+    valid = np.isfinite(values) & np.isfinite(weights) & (weights > 0.0)
+    values = values[valid]
+    weights = weights[valid]
+    if len(values) == 0:
+        raise ValueError("weighted quantiles require at least one positive-weight value")
+    if np.any((quantiles < 0.0) | (quantiles > 1.0)):
+        raise ValueError("quantiles must be in [0, 1]")
+
+    order = np.argsort(values)
+    values = values[order]
+    weights = weights[order]
+    cumulative = np.cumsum(weights)
+    indices = np.searchsorted(cumulative, quantiles * cumulative[-1], side="left")
+    return values[np.clip(indices, 0, len(values) - 1)]
+
+
 def triangulate_map_points_lk(left_image, right_image, map_points, rectifier, args):
     left_gray = cv2.cvtColor(left_image, cv2.COLOR_BGR2GRAY)
     right_gray = cv2.cvtColor(right_image, cv2.COLOR_BGR2GRAY)
@@ -497,11 +527,16 @@ def main():
     if len(accepted) < args.min_keyframes:
         raise RuntimeError(f"only {len(accepted)} reliable keyframes; need {args.min_keyframes}")
     scales = np.asarray([row["scale_m_per_slam_unit"] for row in accepted], dtype=np.float64)
-    scales = robust_values(scales, args.min_keyframes)
+    weights = np.asarray([row["scale_points"] for row in accepted], dtype=np.float64)
+    robust_mask = robust_value_mask(scales, args.min_keyframes)
+    scales = scales[robust_mask]
+    weights = weights[robust_mask]
     if len(scales) < args.min_keyframes:
         raise RuntimeError(f"only {len(scales)} keyframes remain after robust filtering")
-    scale = float(np.median(scales))
-    q25, q75 = np.percentile(scales, (25, 75))
+    q25, scale, q75 = weighted_quantiles(scales, weights, (0.25, 0.50, 0.75))
+    scale = float(scale)
+    q25 = float(q25)
+    q75 = float(q75)
     relative_iqr = float((q75 - q25) / scale)
     if relative_iqr > args.max_keyframe_relative_iqr:
         raise RuntimeError(
@@ -518,8 +553,10 @@ def main():
         "scale_statistics": {
             "reliable_keyframes": len(accepted),
             "robust_keyframes": len(scales),
-            "q25": float(q25),
-            "q75": float(q75),
+            "total_scale_points": int(np.sum(weights)),
+            "weighting": "scale_points",
+            "q25": q25,
+            "q75": q75,
             "relative_iqr": relative_iqr,
         },
         "calibration": str(args.calibration.resolve()),

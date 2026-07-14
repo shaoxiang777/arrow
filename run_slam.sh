@@ -42,6 +42,7 @@ else
       -m /work/data/arrow360/${SCENE}/video_right_crop.mp4 \
       --frame-skip 2 \
       --no-sleep \
+      --auto-term \
       --eval-log-dir /work/data/arrow360/${SCENE}/ \
       --map-db-out /work/data/arrow360/${SCENE}/my_saved_map.msg"
 fi
@@ -62,11 +63,20 @@ if [[ ! -f "data/arrow360/${SCENE}/my_saved_map_metric.msg" || \
       ! -f "data/arrow360/${SCENE}/frame_trajectory_metric.txt" ]]; then
   log_step "[2/3] Estimating metric SLAM map scale"
 
-  python tools/estimate_stereo_map_scale.py "${SCENE}" \
-    --slam-video "data/arrow360/${SCENE}/video_right_crop.mp4" \
-    --slam-camera cam1 \
-    --calibration "data/ricoh/cali_opencv/virtual_sync_perspective/checkerboard_camchain.yaml" \
-    --other-video "data/arrow360/${SCENE}/video_left_crop.MP4"
+  if ! python tools/estimate_stereo_map_scale.py "${SCENE}" \
+      --slam-video "data/arrow360/${SCENE}/video_right_crop.mp4" \
+      --slam-camera cam1 \
+      --calibration "data/ricoh/cali_opencv/virtual_sync_perspective/checkerboard_camchain.yaml" \
+      --other-video "data/arrow360/${SCENE}/video_left_crop.MP4"; then
+    echo "Metric scale estimation failed; preserving the raw SLAM map and trajectory." >&2
+    exit 1
+  fi
+
+  if [[ ! -f "data/arrow360/${SCENE}/my_saved_map_metric.msg" || \
+        ! -f "data/arrow360/${SCENE}/frame_trajectory_metric.txt" ]]; then
+    echo "Metric scale estimation finished without creating both metric outputs." >&2
+    exit 1
+  fi
 fi
 
 # Prefer metric outputs when both are available.
