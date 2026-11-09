@@ -93,6 +93,11 @@ xhost +SI:localuser:root
 
 Print [`stereo_calibration/calib.io_checker_297x210_7x10_25.pdf`](stereo_calibration/calib.io_checker_297x210_7x10_25.pdf) on A4 paper without automatic page scaling. Attach it to a flat, rigid surface and measure the printed square size with a ruler.
 
+The two input videos must already be stitched into standard **equirectangular projection**. Each frame must cover the complete sphere (`360° × 180°`) and normally has a `2:1` width-to-height ratio, for example `4096 × 2048` or `5760 × 2880`.
+
+Do not use camera-native dual-fisheye files or proprietary raw 360° containers directly. For example, a GoPro `.360` file contains separate lens streams and is not itself a standard equirectangular video. First export each recording as a 360° equirectangular MP4 with the camera vendor's stitching software. Use the same projection, resolution, frame rate, and export settings for both cameras; do not export a reframed flat video.
+
+
 Place the two calibration videos at:
 
 ```text
@@ -107,45 +112,26 @@ Activate the project environment:
 conda activate arrow
 ```
 
-Open `run_cali_opencv.sh` and update the parameters for your recordings:
+Open `run_cali_opencv.sh` and first update only the video paths and checkerboard parameters. The synchronized start frames are determined in the next step; do not copy `557` and `554` for different recordings.
 
 ```bash
 CAM0_VIDEO="data/ricoh/cali_opencv/cam_0/video.MP4"
 CAM1_VIDEO="data/ricoh/cali_opencv/cam_1/video.MP4"
-
-CAM0_START_FRAME=557
-CAM1_START_FRAME=554
-TIMESTAMP_FPS=30
-PAIR_FRAME_STEP=3
-PAIRS=300
-NUM_PAIRS=50
 
 CHECKERBOARD_ROWS=9
 CHECKERBOARD_COLS=6
 CHECKERBOARD_SQUARE_SIZE=0.024
 ```
 
-- `CAM0_START_FRAME` and `CAM1_START_FRAME`: matching start frames in the two videos.
-- `TIMESTAMP_FPS`: actual recording frame rate.
-- `PAIR_FRAME_STEP`: interval between sampled frame pairs.
-- `PAIRS`: maximum number of synchronized frame pairs to generate.
-- `NUM_PAIRS`: number of uniformly selected pairs used for calibration.
 - `CHECKERBOARD_ROWS` and `CHECKERBOARD_COLS`: OpenCV checkerboard inner-corner dimensions.
 - `CHECKERBOARD_SQUARE_SIZE`: measured checkerboard square size in meters.
 
 ### 2. Find the synchronization offset
 
-Set:
+Decode both videos before choosing `CAM0_START_FRAME` and `CAM1_START_FRAME`:
 
 ```bash
-RUN_EXTRACT_sync=1
-RUN_EXTRACT_360=0
-```
-
-Run:
-
-```bash
-bash run_cali_opencv.sh
+RUN_EXTRACT_sync=1 RUN_EXTRACT_360=0 bash run_cali_opencv.sh
 ```
 
 The script decodes both videos into `cam_0/frames` and `cam_1/frames` under `SYNC_ROOT`. Compare the images and identify frame numbers that represent the same moment.
@@ -161,7 +147,13 @@ The script decodes both videos into `cam_0/frames` and `cam_1/frames` under `SYN
   </tr>
 </table>
 
-These images show the same moment at frame `127` in `cam_0` and frame `124` in `cam_1`, revealing a fixed offset of three frames.
+These images show the same moment at frame `127` in `cam_0` and frame `124` in `cam_1`, revealing a fixed offset of three frames:
+
+```text
+offset = cam0 frame - cam1 frame = 127 - 124 = 3
+```
+
+Verify the offset with several matching moments rather than relying on only one pair. Then inspect the decoded frames and choose a later synchronized pair where the checkerboard calibration sequence begins and the board is sharp and visible in both cameras. For these recordings, frame `557` in `cam_0` was selected; applying the measured offset gives frame `554` in `cam_1`.
 
 The final start frames used by this project are:
 
@@ -170,21 +162,31 @@ CAM0_START_FRAME=557
 CAM1_START_FRAME=554
 ```
 
-Because `557 - 554 = 3`, the selected start frames preserve the same three-frame offset. Recalculate this offset when using different recordings.
+Because `557 - 554 = 3`, the selected start frames preserve the measured offset. The pair `127`/`124` establishes the offset; it does not by itself determine the later start pair `557`/`554`. Recalculate the offset and choose suitable start frames whenever the recordings change.
 
 ### 3. Generate synchronized equirectangular pairs
 
-Set:
+Now update the pairing parameters in `run_cali_opencv.sh`:
 
 ```bash
-RUN_EXTRACT_sync=0
-RUN_EXTRACT_360=1
+CAM0_START_FRAME=557
+CAM1_START_FRAME=554
+TIMESTAMP_FPS=30
+PAIR_FRAME_STEP=3
+PAIRS=300
+NUM_PAIRS=50
 ```
 
-Run the script again:
+- `CAM0_START_FRAME` and `CAM1_START_FRAME`: a verified synchronized pair near the beginning of the useful calibration sequence.
+- `TIMESTAMP_FPS`: actual recording frame rate.
+- `PAIR_FRAME_STEP`: interval between sampled frame pairs.
+- `PAIRS`: maximum number of synchronized frame pairs to generate.
+- `NUM_PAIRS`: number of uniformly selected pairs used for calibration.
+
+Generate the synchronized pairs:
 
 ```bash
-bash run_cali_opencv.sh
+RUN_EXTRACT_sync=0 RUN_EXTRACT_360=1 bash run_cali_opencv.sh
 ```
 
 The synchronized frame pairs are written to:
@@ -200,17 +202,10 @@ Check that images with matching filenames show the same moment and that the chec
 
 ### 4. Run the OpenCV stereo calibration
 
-Set:
+Run with both extraction stages disabled:
 
 ```bash
-RUN_EXTRACT_sync=0
-RUN_EXTRACT_360=0
-```
-
-Run:
-
-```bash
-bash run_cali_opencv.sh
+RUN_EXTRACT_sync=0 RUN_EXTRACT_360=0 bash run_cali_opencv.sh
 ```
 
 The script selects `NUM_PAIRS` synchronized pairs, converts them to perspective views, detects the checkerboard, and performs stereo calibration. The default output is:
